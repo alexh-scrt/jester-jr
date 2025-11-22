@@ -1,0 +1,67 @@
+# Jester Jr Configuration File
+# This file defines proxy settings and filtering rules
+
+[proxy]
+# Address to listen on (IP:PORT)
+listen_address = "127.0.0.1:8080"
+
+# Backend server address (IP:PORT)
+backend_address = "127.0.0.1:9090"
+
+# Timeout for connections in seconds
+timeout_seconds = 30
+
+# ===== REQUEST FILTERING RULES =====
+# Rules are evaluated in order. First matching rule wins.
+
+[[request_rules]]
+name = "Allow protected paths with auth"
+action = "allow"
+path_regex = "^/protected/.*"
+require_header = "Authorization"
+
+[[request_rules]]
+name = "Block protected paths without auth"
+action = "deny"
+path_regex = "^/protected/.*"
+
+[[request_rules]]
+name = "Block admin paths"
+action = "deny"
+path_regex = "^/admin/.*"
+# Optional: restrict to specific methods
+methods = ["GET", "POST", "PUT", "DELETE"]
+
+[[request_rules]]
+name = "Block dangerous methods"
+action = "deny"
+methods = ["TRACE", "TRACK"]
+
+[[request_rules]]
+name = "Allow API endpoints"
+action = "allow"
+path_regex = "^/api/.*"
+methods = ["GET", "POST"]
+
+[[request_rules]]
+name = "Block specific path"
+action = "deny"
+path_regex = "^/secret/.*"
+
+# ===== RESPONSE FILTERING RULES =====
+
+[[response_rules]]
+name = "Block server errors"
+action = "deny"
+status_codes = [500, 501, 502, 503, 504]
+
+# [[response_rules]]
+# name = "Block large responses"
+# action = "deny"
+# max_size_bytes = 10485760  # 10 MB
+
+# Example: Allow specific status codes
+# [[response_rules]]
+# name = "Allow success"
+# action = "allow"
+# status_codes = [200, 201, 202, 204]
