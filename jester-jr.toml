@@ -11,6 +11,24 @@ backend_address = "127.0.0.1:9090"
 # Timeout for connections in seconds
 timeout_seconds = 30
 
+# ===== TLS/SSL CONFIGURATION =====
+# Enable HTTPS support with certificate-based encryption
+
+[tls]
+# Enable or disable TLS
+enabled = true
+
+# Path to the certificate file (PEM format)
+# Should contain one or more certificates in PEM format
+cert_file = "./certs/cert.pem"
+
+# Path to the private key file (PEM format, PKCS#8)
+# Must match the certificate
+# IMPORTANT: Keep this file secure! (chmod 600)
+key_file = "./certs/key.pem"
+
+
+
 # ===== REQUEST FILTERING RULES =====
 # Rules are evaluated in order. First matching rule wins.
 

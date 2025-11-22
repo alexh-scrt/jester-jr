@@ -9,3 +9,10 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
 regex = "1.10"
+
+# TLS/SSL support
+rustls = "0.23"
+rustls-pemfile = "2.1"
+
+[dev-dependencies]
+tempfile = "3.8"  # For testing certificate loading

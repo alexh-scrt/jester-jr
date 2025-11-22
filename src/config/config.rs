@@ -4,6 +4,9 @@
 //! server and define filtering rules. It handles TOML deserialization and compiles
 //! filtering rules with regex patterns for efficient runtime evaluation.
 //!
+//! ## New in v0.2.0: TLS Configuration
+//! Added optional TLS settings for HTTPS support.
+//!
 //! ## Author
 //! a13x.h.cc@gmail.com
 
@@ -17,6 +20,8 @@ use std::path::Path;
 pub struct Config {
     pub proxy: ProxySettings,
     #[serde(default)]
+    pub tls: Option<TlsSettings>,  // NEW: Optional TLS configuration
+    #[serde(default)]
     pub request_rules: Vec<RequestRule>,
     #[serde(default)]
     pub response_rules: Vec<ResponseRule>,
@@ -28,6 +33,29 @@ pub struct ProxySettings {
     pub listen_address: String,
     pub backend_address: String,
     pub timeout_seconds: u64,
+}
+
+/// TLS/SSL settings (new in v0.2.0)
+///
+/// Configuration for enabling HTTPS support with certificate-based encryption.
+///
+/// # Example TOML
+/// ```toml
+/// [tls]
+/// enabled = true
+/// cert_file = "./certs/cert.pem"
+/// key_file = "./certs/key.pem"
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct TlsSettings {
+    /// Whether TLS is enabled
+    pub enabled: bool,
+    
+    /// Path to the certificate file (PEM format)
+    pub cert_file: String,
+    
+    /// Path to the private key file (PEM format, PKCS#8)
+    pub key_file: String,
 }
 
 /// Request filtering rule (from TOML)
@@ -255,6 +283,28 @@ status_codes = [500, 502, 503]
         assert_eq!(config.proxy.listen_address, "127.0.0.1:8080");
         assert_eq!(config.request_rules.len(), 1);
         assert_eq!(config.response_rules.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_config_with_tls() {
+        let toml_str = r#"
+[proxy]
+listen_address = "127.0.0.1:8443"
+backend_address = "127.0.0.1:9090"
+timeout_seconds = 30
+
+[tls]
+enabled = true
+cert_file = "./certs/cert.pem"
+key_file = "./certs/key.pem"
+"#;
+        
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.tls.is_some());
+        let tls = config.tls.unwrap();
+        assert!(tls.enabled);
+        assert_eq!(tls.cert_file, "./certs/cert.pem");
+        assert_eq!(tls.key_file, "./certs/key.pem");
     }
 
     #[test]

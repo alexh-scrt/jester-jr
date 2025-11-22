@@ -10,6 +10,7 @@ mod config;
 
 pub use config::{
     Config,
+    TlsSettings,
     CompiledRequestRule,
     CompiledResponseRule,
     RuleResult,
