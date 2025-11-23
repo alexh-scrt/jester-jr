@@ -1350,6 +1350,11 @@ impl Read for TlsReader {
             // Try to read decrypted data directly
             match self.conn.reader().read(buf) {
                 Ok(n) if n > 0 => return Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No decrypted data ready yet, wait briefly and continue
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
                 Ok(_) => {
                     // No decrypted data available, need to read more TLS data
                     match self.conn.read_tls(&mut self.stream) {
@@ -1396,6 +1401,10 @@ impl std::io::BufRead for TlsReader {
                 Ok(n) if n > 0 => {
                     self.buffer.extend_from_slice(&temp_buf[..n]);
                     return Ok(&self.buffer[..]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
                 }
                 Ok(_) => {
                     // Need more TLS data
