@@ -14,15 +14,27 @@ use serde::Deserialize;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::collections::HashMap;
 
 /// Main configuration structure
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub proxy: ProxySettings,
     #[serde(default)]
-    pub tls: Option<TlsSettings>,  // NEW: Optional TLS configuration
+    pub global: GlobalSettings,
+    
+    #[serde(default)]
+    pub listener: HashMap<String, ListenerConfig>,
+    
+    // Keep for backward compatibility (will be deprecated)
+    #[serde(default)]
+    pub proxy: Option<ProxySettings>,
+    
+    #[serde(default)]
+    pub tls: Option<TlsSettings>,
+    
     #[serde(default)]
     pub request_rules: Vec<RequestRule>,
+    
     #[serde(default)]
     pub response_rules: Vec<ResponseRule>,
 }
@@ -58,8 +70,94 @@ pub struct TlsSettings {
     pub key_file: String,
 }
 
+/// Global settings that apply to all listeners
+#[derive(Debug, Deserialize, Clone)]
+pub struct GlobalSettings {
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        Self {
+            log_level: "info".to_string(),
+            timeout_seconds: 30,
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_timeout() -> u64 {
+    30
+}
+
+/// Configuration for a single listener
+#[derive(Debug, Deserialize, Clone)]
+pub struct ListenerConfig {
+    pub ip: String,
+    pub port: u16,
+    
+    #[serde(default)]
+    pub description: Option<String>,
+    
+    #[serde(default)]
+    pub default_backend: Option<String>,
+    
+    #[serde(default = "default_action")]
+    pub default_action: String,
+    
+    #[serde(default)]
+    pub tls: Option<TlsSettings>,
+    
+    #[serde(default)]
+    pub request_rules: Vec<RequestRule>,
+    
+    #[serde(default)]
+    pub response_rules: Vec<ResponseRule>,
+    
+    #[serde(default)]
+    pub routes: Vec<RouteConfig>,
+}
+
+fn default_action() -> String {
+    "reject".to_string()
+}
+
+/// Route configuration (path-based routing)
+#[derive(Debug, Deserialize, Clone)]
+pub struct RouteConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    
+    #[serde(default)]
+    pub path_regex: Option<String>,
+    
+    pub backend: String,
+    
+    #[serde(default)]
+    pub strip_prefix: bool,
+    
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    
+    #[serde(default)]
+    pub request_rules: Vec<RequestRule>,
+    
+    #[serde(default)]
+    pub response_rules: Vec<ResponseRule>,
+}
+
 /// Request filtering rule (from TOML)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RequestRule {
     pub name: String,
     pub action: RuleAction,
@@ -72,7 +170,7 @@ pub struct RequestRule {
 }
 
 /// Response filtering rule (from TOML)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ResponseRule {
     pub name: String,
     pub action: RuleAction,
@@ -107,6 +205,35 @@ pub struct CompiledResponseRule {
     pub action: RuleAction,
     pub status_codes: Option<Vec<u16>>,
     pub max_size_bytes: Option<usize>,
+}
+
+/// Compiled listener configuration with pre-compiled regexes
+#[derive(Clone)]
+pub struct CompiledListener {
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+    pub description: Option<String>,
+    pub default_backend: Option<String>,
+    pub default_action: String,
+    pub tls: Option<TlsSettings>,
+    pub request_rules: Vec<CompiledRequestRule>,
+    pub response_rules: Vec<CompiledResponseRule>,
+    pub routes: Vec<CompiledRoute>,
+    pub timeout_seconds: u64,
+}
+
+/// Compiled route with pre-compiled regex
+#[derive(Clone)]
+pub struct CompiledRoute {
+    pub name: Option<String>,
+    pub path_prefix: Option<String>,
+    pub path_pattern: Option<Regex>,
+    pub backend: String,
+    pub strip_prefix: bool,
+    pub timeout_seconds: u64,
+    pub request_rules: Vec<CompiledRequestRule>,
+    pub response_rules: Vec<CompiledResponseRule>,
 }
 
 /// Result of evaluating a rule
@@ -158,6 +285,260 @@ impl Config {
                 max_size_bytes: rule.max_size_bytes,
             }
         }).collect()
+    }
+    
+    /// Validate the configuration
+    pub fn validate(&self) -> Result<(), String> {
+        // Check for backward compatibility or new format
+        if self.listener.is_empty() && self.proxy.is_none() {
+            return Err("Configuration must have either listeners or proxy settings".to_string());
+        }
+        
+        // Validate each listener
+        for (name, listener) in &self.listener {
+            self.validate_listener(name, listener)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn validate_listener(&self, name: &str, listener: &ListenerConfig) -> Result<(), String> {
+        // Validate IP address format
+        if listener.ip.is_empty() {
+            return Err(format!("Listener '{}': IP address cannot be empty", name));
+        }
+        
+        // Validate port range
+        if listener.port == 0 {
+            return Err(format!("Listener '{}': Port cannot be 0", name));
+        }
+        
+        // Validate default_action
+        if listener.default_action != "reject" && listener.default_action != "forward" {
+            return Err(format!(
+                "Listener '{}': default_action must be 'reject' or 'forward', got '{}'",
+                name, listener.default_action
+            ));
+        }
+        
+        // If default_action is "forward", default_backend must be set
+        if listener.default_action == "forward" && listener.default_backend.is_none() {
+            return Err(format!(
+                "Listener '{}': default_action 'forward' requires default_backend to be set",
+                name
+            ));
+        }
+        
+        // Validate TLS configuration if enabled
+        if let Some(tls) = &listener.tls {
+            if tls.enabled {
+                if tls.cert_file.is_empty() {
+                    return Err(format!("Listener '{}': TLS cert_file cannot be empty", name));
+                }
+                if tls.key_file.is_empty() {
+                    return Err(format!("Listener '{}': TLS key_file cannot be empty", name));
+                }
+            }
+        }
+        
+        // Validate routes
+        for (i, route) in listener.routes.iter().enumerate() {
+            self.validate_route(name, i, route)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn validate_route(&self, listener_name: &str, index: usize, route: &RouteConfig) -> Result<(), String> {
+        let default_name = format!("route-{}", index);
+        let route_name = route.name.as_deref()
+            .unwrap_or(&default_name);
+        
+        // Must have either path_prefix or path_regex, but not both
+        match (&route.path_prefix, &route.path_regex) {
+            (None, None) => {
+                return Err(format!(
+                    "Listener '{}', route '{}': must have either path_prefix or path_regex",
+                    listener_name, route_name
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "Listener '{}', route '{}': cannot have both path_prefix and path_regex",
+                    listener_name, route_name
+                ));
+            }
+            _ => {}
+        }
+        
+        // If strip_prefix is true, must use path_prefix (not regex)
+        if route.strip_prefix && route.path_prefix.is_none() {
+            return Err(format!(
+                "Listener '{}', route '{}': strip_prefix requires path_prefix (not path_regex)",
+                listener_name, route_name
+            ));
+        }
+        
+        // Validate backend format (should be address:port)
+        if !route.backend.contains(':') {
+            return Err(format!(
+                "Listener '{}', route '{}': backend must be in format 'address:port', got '{}'",
+                listener_name, route_name, route.backend
+            ));
+        }
+        
+        // Validate path_regex if present
+        if let Some(regex_str) = &route.path_regex {
+            Regex::new(regex_str).map_err(|e| format!(
+                "Listener '{}', route '{}': invalid regex '{}': {}",
+                listener_name, route_name, regex_str, e
+            ))?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Compile all listeners
+    pub fn compile_listeners(&self) -> Result<Vec<CompiledListener>, Box<dyn std::error::Error>> {
+        let mut compiled = Vec::new();
+        
+        for (name, listener) in &self.listener {
+            compiled.push(self.compile_listener(name.clone(), listener)?);
+        }
+        
+        Ok(compiled)
+    }
+    
+    fn compile_listener(&self, name: String, listener: &ListenerConfig) -> Result<CompiledListener, Box<dyn std::error::Error>> {
+        // Compile listener-level request rules
+        let request_rules = self.compile_request_rules_list(&listener.request_rules)?;
+        
+        // Compile listener-level response rules
+        let response_rules = self.compile_response_rules_list(&listener.response_rules);
+        
+        // Compile all routes
+        let mut routes = Vec::new();
+        for route in &listener.routes {
+            routes.push(self.compile_route(route, listener)?);
+        }
+        
+        // Determine timeout (listener-specific or global)
+        let timeout_seconds = self.global.timeout_seconds;
+        
+        Ok(CompiledListener {
+            name,
+            ip: listener.ip.clone(),
+            port: listener.port,
+            description: listener.description.clone(),
+            default_backend: listener.default_backend.clone(),
+            default_action: listener.default_action.clone(),
+            tls: listener.tls.clone(),
+            request_rules,
+            response_rules,
+            routes,
+            timeout_seconds,
+        })
+    }
+    
+    fn compile_route(&self, route: &RouteConfig, _listener: &ListenerConfig) -> Result<CompiledRoute, Box<dyn std::error::Error>> {
+        // Compile path regex if present
+        let path_pattern = if let Some(regex_str) = &route.path_regex {
+            Some(Regex::new(regex_str)?)
+        } else {
+            None
+        };
+        
+        // Compile route-specific request rules
+        let request_rules = self.compile_request_rules_list(&route.request_rules)?;
+        
+        // Compile route-specific response rules
+        let response_rules = self.compile_response_rules_list(&route.response_rules);
+        
+        // Determine timeout (route > listener > global)
+        let timeout_seconds = route.timeout_seconds
+            .unwrap_or(self.global.timeout_seconds);
+        
+        Ok(CompiledRoute {
+            name: route.name.clone(),
+            path_prefix: route.path_prefix.clone(),
+            path_pattern,
+            backend: route.backend.clone(),
+            strip_prefix: route.strip_prefix,
+            timeout_seconds,
+            request_rules,
+            response_rules,
+        })
+    }
+    
+    fn compile_request_rules_list(&self, rules: &[RequestRule]) -> Result<Vec<CompiledRequestRule>, Box<dyn std::error::Error>> {
+        let mut compiled = Vec::new();
+        for rule in rules {
+            let path_pattern = if let Some(pattern_str) = &rule.path_regex {
+                Some(Regex::new(pattern_str)?)
+            } else {
+                None
+            };
+            
+            compiled.push(CompiledRequestRule {
+                name: rule.name.clone(),
+                action: rule.action.clone(),
+                path_pattern,
+                methods: rule.methods.clone(),
+                require_header: rule.require_header.clone(),
+            });
+        }
+        Ok(compiled)
+    }
+    
+    fn compile_response_rules_list(&self, rules: &[ResponseRule]) -> Vec<CompiledResponseRule> {
+        rules.iter().map(|rule| {
+            CompiledResponseRule {
+                name: rule.name.clone(),
+                action: rule.action.clone(),
+                status_codes: rule.status_codes.clone(),
+                max_size_bytes: rule.max_size_bytes,
+            }
+        }).collect()
+    }
+    
+    /// Convert old single-listener format to new multi-listener format
+    pub fn migrate_from_legacy(&mut self) {
+        // If using old format (proxy settings), convert to new format
+        if let Some(proxy) = &self.proxy {
+            if self.listener.is_empty() {
+                let mut listener_config = ListenerConfig {
+                    ip: proxy.listen_address.split(':').next()
+                        .unwrap_or("0.0.0.0").to_string(),
+                    port: proxy.listen_address.split(':').nth(1)
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(8080),
+                    description: Some("Migrated from legacy config".to_string()),
+                    default_backend: Some(proxy.backend_address.clone()),
+                    default_action: "forward".to_string(),
+                    tls: self.tls.clone(),
+                    request_rules: self.request_rules.clone(),
+                    response_rules: self.response_rules.clone(),
+                    routes: vec![],
+                };
+                
+                // Create a single catch-all route
+                listener_config.routes.push(RouteConfig {
+                    name: Some("default".to_string()),
+                    path_prefix: Some("/".to_string()),
+                    path_regex: None,
+                    backend: proxy.backend_address.clone(),
+                    strip_prefix: false,
+                    timeout_seconds: Some(proxy.timeout_seconds),
+                    request_rules: vec![],
+                    response_rules: vec![],
+                });
+                
+                self.listener.insert("default".to_string(), listener_config);
+                
+                println!("⚠️  Migrated legacy configuration to new multi-listener format");
+                println!("   Consider updating your config file to use the new format");
+            }
+        }
     }
 }
 
@@ -280,7 +661,7 @@ status_codes = [500, 502, 503]
 "#;
         
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.proxy.listen_address, "127.0.0.1:8080");
+        assert_eq!(config.proxy.as_ref().unwrap().listen_address, "127.0.0.1:8080");
         assert_eq!(config.request_rules.len(), 1);
         assert_eq!(config.response_rules.len(), 1);
     }

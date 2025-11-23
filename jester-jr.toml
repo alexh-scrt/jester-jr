@@ -1,85 +1,340 @@
-# Jester Jr Configuration File
-# This file defines proxy settings and filtering rules
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jester Jr Multi-Listener Configuration
+# Version: 0.2.0 - Multi-Listener Support
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# This configuration demonstrates the new multi-listener architecture with:
+# • Multiple named listeners on different IP:port combinations
+# • Path-based routing per listener
+# • Route-specific backends and rules
+# • Hierarchical filtering (listener + route level)
+# • Per-listener TLS configuration
+# • Default backend handling
+# 
+# The configuration will automatically migrate legacy v0.1.0 configs.
+# ═══════════════════════════════════════════════════════════════════════════════
 
-[proxy]
-# Address to listen on (IP:PORT)
-listen_address = "127.0.0.1:8080"
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Backend server address (IP:PORT)
-backend_address = "127.0.0.1:9090"
+[global]
+# Default log level for all listeners
+log_level = "info"
 
-# Timeout for connections in seconds
+# Default timeout for all operations (can be overridden per route)
 timeout_seconds = 30
 
-# ===== TLS/SSL CONFIGURATION =====
-# Enable HTTPS support with certificate-based encryption
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 1: Public API (External Traffic)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-[tls]
-# Enable or disable TLS
+[listener."public-api"]
+ip = "0.0.0.0"
+port = 8080
+description = "Public-facing API gateway with TLS and routing"
+
+# What to do when no routes match
+default_action = "reject"  # Return 404 for unmatched routes
+
+# TLS Configuration for this listener
+[listener."public-api".tls]
 enabled = true
+cert_file = "/mnt/secure/cert/secretai-yyzz/fullchain.pem"
+key_file = "/mnt/secure/cert/secretai-yyzz/privkey.pem"
 
-# Path to the certificate file (PEM format)
-# Should contain one or more certificates in PEM format
-cert_file = "./certs/cert.pem"
+# ────────────────────────────────────────────────────────────────────────────────
+# Listener-level rules (apply to ALL routes on this listener)
+# ────────────────────────────────────────────────────────────────────────────────
 
-# Path to the private key file (PEM format, PKCS#8)
-# Must match the certificate
-# IMPORTANT: Keep this file secure! (chmod 600)
-key_file = "./certs/key.pem"
+[[listener."public-api".request_rules]]
+name = "Block dangerous methods globally"
+action = "deny"
+methods = ["TRACE", "TRACK", "DELETE"]
 
-
-
-# ===== REQUEST FILTERING RULES =====
-# Rules are evaluated in order. First matching rule wins.
-
-[[request_rules]]
-name = "Allow protected paths with auth"
+[[listener."public-api".request_rules]]
+name = "Global rate limiting placeholder"
 action = "allow"
-path_regex = "^/protected/.*"
-require_header = "Authorization"
+# Note: In production, you'd add rate limiting logic here
 
-[[request_rules]]
-name = "Block protected paths without auth"
-action = "deny"
-path_regex = "^/protected/.*"
-
-[[request_rules]]
-name = "Block admin paths"
-action = "deny"
-path_regex = "^/admin/.*"
-# Optional: restrict to specific methods
-methods = ["GET", "POST", "PUT", "DELETE"]
-
-[[request_rules]]
-name = "Block dangerous methods"
-action = "deny"
-methods = ["TRACE", "TRACK"]
-
-[[request_rules]]
-name = "Allow API endpoints"
-action = "allow"
-path_regex = "^/api/.*"
-methods = ["GET", "POST"]
-
-[[request_rules]]
-name = "Block specific path"
-action = "deny"
-path_regex = "^/secret/.*"
-
-# ===== RESPONSE FILTERING RULES =====
-
-[[response_rules]]
-name = "Block server errors"
+[[listener."public-api".response_rules]]
+name = "Hide internal server errors from public"
 action = "deny"
 status_codes = [500, 501, 502, 503, 504]
 
-# [[response_rules]]
-# name = "Block large responses"
-# action = "deny"
-# max_size_bytes = 10485760  # 10 MB
+# ────────────────────────────────────────────────────────────────────────────────
+# Routes for public API listener
+# ────────────────────────────────────────────────────────────────────────────────
 
-# Example: Allow specific status codes
-# [[response_rules]]
-# name = "Allow success"
+# Route 1: API v1 → User Service
+[[listener."public-api".routes]]
+name = "api-v0-users"
+path_prefix = "/test"
+backend = "127.0.0.1:9090"
+strip_prefix = false  # Backend receives /123 instead of /api/v1/users/123
+timeout_seconds = 15  # Override global timeout
+
+
+# Route 1: API v1 → User Service
+[[listener."public-api".routes]]
+name = "api-v1-users"
+path_prefix = "/api/v1/users"
+backend = "127.0.0.1:9090"
+strip_prefix = true  # Backend receives /123 instead of /api/v1/users/123
+timeout_seconds = 15  # Override global timeout
+
+[[listener."public-api".routes.request_rules]]
+name = "Require authentication for users API"
+action = "allow"
+require_header = "Authorization"
+
+[[listener."public-api".routes.request_rules]]
+name = "Block unauthenticated requests"
+action = "deny"
+
+# Route 2: API v1 → Post Service
+[[listener."public-api".routes]]
+name = "api-v1-posts"
+path_prefix = "/api/v1/posts"
+backend = "127.0.0.1:8091"
+strip_prefix = true
+
+[[listener."public-api".routes.request_rules]]
+name = "Allow only GET and POST for posts"
+action = "allow"
+methods = ["GET", "POST"]
+
+[[listener."public-api".routes.request_rules]]
+name = "Block other methods on posts"
+action = "deny"
+
+# Route 3: API v2 → New Service (Regex matching)
+[[listener."public-api".routes]]
+name = "api-v2-all"
+path_regex = "^/api/v2/.*"
+backend = "127.0.0.1:8092"
+strip_prefix = false  # Keep full path for v2 API
+
+[[listener."public-api".routes.request_rules]]
+name = "Require API key for v2"
+action = "allow"
+require_header = "X-API-Key"
+
+# Route 4: Health check (no auth required)
+[[listener."public-api".routes]]
+name = "health-check"
+path_prefix = "/health"
+backend = "127.0.0.1:8090"
+strip_prefix = false
+
+[[listener."public-api".routes.request_rules]]
+name = "Allow health checks without auth"
+action = "allow"
+methods = ["GET"]
+
+# Route 5: Protected admin section
+[[listener."public-api".routes]]
+name = "admin-section"
+path_prefix = "/admin"
+backend = "127.0.0.1:8093"
+strip_prefix = true
+
+[[listener."public-api".routes.request_rules]]
+name = "Require admin token"
+action = "allow"
+require_header = "X-Admin-Token"
+
+[[listener."public-api".routes.request_rules]]
+name = "Block non-admin requests"
+action = "deny"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 2: Internal Admin (Private Network)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."internal-admin"]
+ip = "127.0.0.1"  # Only localhost access
+port = 8081
+description = "Internal admin interface (no TLS, trusted network)"
+
+# Forward unmatched requests to default admin backend
+default_backend = "127.0.0.1:9090"
+default_action = "forward"
+
+# No TLS for internal network
+[listener."internal-admin".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Internal admin routes
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: Admin Dashboard
+[[listener."internal-admin".routes]]
+name = "admin-dashboard"
+path_prefix = "/dashboard"
+backend = "127.0.0.1:9091"
+strip_prefix = true
+
+# Route 2: Admin API
+[[listener."internal-admin".routes]]
+name = "admin-api"
+path_prefix = "/api"
+backend = "127.0.0.1:9092"
+strip_prefix = true
+
+[[listener."internal-admin".routes.request_rules]]
+name = "Allow all methods for admin API"
+action = "allow"
+
+# Route 3: Monitoring
+[[listener."internal-admin".routes]]
+name = "monitoring"
+path_prefix = "/monitoring"
+backend = "127.0.0.1:9093"
+strip_prefix = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 3: Development Server (Local Development)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."dev-server"]
+ip = "127.0.0.1"
+port = 3000
+description = "Development server with relaxed rules"
+
+# Forward everything to local dev server by default
+default_backend = "127.0.0.1:3001"
+default_action = "forward"
+
+# No TLS for development
+[listener."dev-server".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Relaxed rules for development
+# ────────────────────────────────────────────────────────────────────────────────
+
+[[listener."dev-server".request_rules]]
+name = "Allow all requests in development"
+action = "allow"
+
+# Route 1: API development
+[[listener."dev-server".routes]]
+name = "dev-api"
+path_prefix = "/api"
+backend = "127.0.0.1:3002"
+strip_prefix = false
+timeout_seconds = 60  # Longer timeout for debugging
+
+# Route 2: Frontend dev server
+[[listener."dev-server".routes]]
+name = "dev-frontend"
+path_prefix = "/app"
+backend = "127.0.0.1:3003"
+strip_prefix = true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 4: Load Balancer Interface
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."load-balancer"]
+ip = "0.0.0.0"
+port = 8443
+description = "HTTPS load balancer interface"
+default_action = "reject"
+
+[listener."load-balancer".tls]
+enabled = true
+cert_file = "/mnt/secure/cert/secretai-yyzz/fullchain.pem"
+key_file = "/mnt/secure/cert/secretai-yyzz/privkey.pem"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Load balancer routes
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route to primary backend
+[[listener."load-balancer".routes]]
+name = "primary-backend"
+path_prefix = "/"
+backend = "127.0.0.1:8090"
+strip_prefix = false
+
+[[listener."load-balancer".routes.request_rules]]
+name = "Health check bypass"
+action = "allow"
+path_regex = "^/health.*"
+
+[[listener."load-balancer".routes.request_rules]]
+name = "Require valid requests"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+[[listener."load-balancer".routes.request_rules]]
+name = "Block invalid methods"
+action = "deny"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKWARD COMPATIBILITY SECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# The sections below are for backward compatibility with v0.1.0 configs.
+# If you're using the new multi-listener format above, you can remove this section.
+# If these sections are present and no listeners are defined above, 
+# they will be automatically migrated to a "default" listener.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Uncomment to test legacy migration:
+# [proxy]
+# listen_address = "0.0.0.0:8080"
+# backend_address = "127.0.0.1:9090"
+# timeout_seconds = 30
+
+# [tls]
+# enabled = false
+# cert_file = "/path/to/cert.pem"
+# key_file = "/path/to/key.pem"
+
+# [[request_rules]]
+# name = "Legacy rule example"
 # action = "allow"
-# status_codes = [200, 201, 202, 204]
+# path_regex = "^/api/.*"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION NOTES
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Path Matching:
+# • path_prefix: Simple string matching (faster)
+# • path_regex: Regular expression matching (more flexible)
+# • Cannot use both prefix and regex on same route
+#
+# Path Rewriting:
+# • strip_prefix = true: Remove matched prefix before forwarding
+# • Only works with path_prefix, not path_regex
+# • /api/v1/users/123 with prefix "/api/v1" becomes /users/123
+#
+# Rule Evaluation:
+# • Rules evaluated in order: listener-level first, then route-level
+# • First matching rule wins
+# • Default action if no rules match: ALLOW
+#
+# Default Actions:
+# • "reject": Return 404 for unmatched routes
+# • "forward": Send to default_backend (requires default_backend to be set)
+#
+# TLS Configuration:
+# • Per-listener TLS settings
+# • Certificates must exist and be readable
+# • Use different certificates for different listeners if needed
+#
+# Backend Format:
+# • Must be "address:port" format
+# • Can be IP addresses or hostnames
+# • Examples: "127.0.0.1:8080", "backend.local:9090"
+#
+# ═══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,44 @@
+# Simple test configuration for multi-listener validation
+[global]
+log_level = "info"
+timeout_seconds = 30
+
+[listener."test-api"]
+ip = "127.0.0.1"
+port = 8080
+description = "Test API listener"
+default_action = "reject"
+
+[listener."test-api".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+[[listener."test-api".routes]]
+name = "api-route"
+path_prefix = "/api"
+backend = "127.0.0.1:8090"
+strip_prefix = true
+
+[[listener."test-api".routes.request_rules]]
+name = "Allow GET and POST"
+action = "allow"
+methods = ["GET", "POST"]
+
+[listener."admin"]
+ip = "127.0.0.1"
+port = 8081
+description = "Admin interface"
+default_backend = "127.0.0.1:9090"
+default_action = "forward"
+
+[listener."admin".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+[[listener."admin".routes]]
+name = "admin-dashboard"
+path_prefix = "/dashboard"
+backend = "127.0.0.1:9091"
+strip_prefix = true

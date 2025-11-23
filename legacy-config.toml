@@ -1,0 +1,27 @@
+# Legacy v0.1.0 Configuration Test
+# This should be automatically migrated to multi-listener format
+
+[proxy]
+listen_address = "127.0.0.1:8080"
+backend_address = "127.0.0.1:9090"
+timeout_seconds = 30
+
+[tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+[[request_rules]]
+name = "Allow API endpoints"
+action = "allow"
+path_regex = "^/api/.*"
+
+[[request_rules]]
+name = "Block admin paths"
+action = "deny"
+path_regex = "^/admin/.*"
+
+[[response_rules]]
+name = "Block server errors"
+action = "deny"
+status_codes = [500, 502, 503]
