@@ -9,14 +9,6 @@
 mod config;
 
 pub use config::{
-    Config,
-    GlobalSettings,
-    ListenerConfig,
-    RouteConfig,
-    TlsSettings,
-    CompiledListener,
-    CompiledRoute,
-    CompiledRequestRule,
-    CompiledResponseRule,
-    RuleResult,
+    CompiledListener, CompiledRequestRule, CompiledResponseRule, CompiledRoute, Config,
+    GlobalSettings, ListenerConfig, RouteConfig, RuleResult, TlsSettings,
 };

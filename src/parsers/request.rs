@@ -6,9 +6,10 @@
 //! ## Author
 //! a13x.h.cc@gmail.com
 
+use crate::config::{CompiledRequestRule, RuleResult};
 use std::collections::HashMap;
 use std::io::BufRead;
-use crate::config::{CompiledRequestRule, RuleResult};
+use tracing::{debug, warn};
 
 /// Represents a parsed HTTP request with headers and metadata.
 ///
@@ -21,16 +22,18 @@ pub struct HttpRequest {
     pub path: String,
     pub version: String,
     pub headers: HashMap<String, String>,
-    pub raw_headers: Vec<u8>,  // Original header bytes for forwarding
+    pub raw_headers: Vec<u8>, // Original header bytes for forwarding
     pub content_length: Option<usize>,
 }
 
 impl HttpRequest {
     /// Parse HTTP request from a buffered reader
     /// Reads ONLY the headers, leaving the body in the stream for streaming
+    #[tracing::instrument(skip(reader), level = "debug")]
     pub fn parse<R: BufRead>(reader: &mut R) -> Result<Self, String> {
         let mut raw_headers = Vec::new();
         let mut lines = Vec::new();
+        debug!("Starting HTTP request parse");
 
         // Read lines until we hit the empty line that separates headers from body
         loop {
@@ -48,7 +51,10 @@ impl HttpRequest {
 
                     lines.push(line.trim_end().to_string());
                 }
-                Err(e) => return Err(format!("Error reading headers: {}", e)),
+                Err(e) => {
+                    warn!(error = ?e, "Error reading headers");
+                    return Err(format!("Error reading headers: {}", e));
+                }
             }
         }
 
@@ -65,6 +71,7 @@ impl HttpRequest {
         let method = request_line_parts[0].to_string();
         let path = request_line_parts[1].to_string();
         let version = request_line_parts[2].to_string();
+        debug!(%method, %path, %version, header_lines = lines.len().saturating_sub(1), "Parsed request line");
 
         // Parse headers
         let mut headers = HashMap::new();
@@ -77,7 +84,8 @@ impl HttpRequest {
         }
 
         // Extract Content-Length if present
-        let content_length = headers.get("content-length")
+        let content_length = headers
+            .get("content-length")
             .and_then(|v| v.parse::<usize>().ok());
 
         Ok(HttpRequest {
@@ -102,10 +110,10 @@ impl HttpRequest {
         for rule in rules {
             match rule.evaluate(&self.method, &self.path, &self.headers) {
                 RuleResult::Allow => {
-                    return Ok(());  // Explicitly allowed
+                    return Ok(()); // Explicitly allowed
                 }
                 RuleResult::Deny(reason) => {
-                    return Err(reason);  // Denied with reason
+                    return Err(reason); // Denied with reason
                 }
                 RuleResult::Continue => {
                     // Rule doesn't apply, check next rule

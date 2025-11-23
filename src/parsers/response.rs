@@ -6,9 +6,10 @@
 //! ## Author
 //! a13x.h.cc@gmail.com
 
+use crate::config::{CompiledResponseRule, RuleResult};
 use std::collections::HashMap;
 use std::io::BufRead;
-use crate::config::{CompiledResponseRule, RuleResult};
+use tracing::{debug, warn};
 
 /// Represents a parsed HTTP response with headers and metadata.
 ///
@@ -21,16 +22,18 @@ pub struct HttpResponse {
     pub status_code: u16,
     pub status_text: String,
     pub headers: HashMap<String, String>,
-    pub raw_headers: Vec<u8>,  // Original header bytes for forwarding
+    pub raw_headers: Vec<u8>, // Original header bytes for forwarding
     pub content_length: Option<usize>,
 }
 
 impl HttpResponse {
     /// Parse HTTP response from a buffered reader
     /// Reads ONLY the headers, leaving the body in the stream for streaming
+    #[tracing::instrument(skip(reader), level = "debug")]
     pub fn parse<R: BufRead>(reader: &mut R) -> Result<Self, String> {
         let mut raw_headers = Vec::new();
         let mut lines = Vec::new();
+        debug!("Starting HTTP response parse");
 
         // Read lines until we hit the empty line
         loop {
@@ -46,7 +49,10 @@ impl HttpResponse {
 
                     lines.push(line.trim_end().to_string());
                 }
-                Err(e) => return Err(format!("Error reading response headers: {}", e)),
+                Err(e) => {
+                    warn!(error = ?e, "Error reading response headers");
+                    return Err(format!("Error reading response headers: {}", e));
+                }
             }
         }
 
@@ -61,9 +67,11 @@ impl HttpResponse {
         }
 
         let version = status_line_parts[0].to_string();
-        let status_code = status_line_parts[1].parse::<u16>()
+        let status_code = status_line_parts[1]
+            .parse::<u16>()
             .map_err(|_| "Invalid status code")?;
         let status_text = status_line_parts[2].to_string();
+        debug!(%version, status_code, %status_text, header_lines = lines.len().saturating_sub(1), "Parsed response line");
 
         // Parse headers
         let mut headers = HashMap::new();
@@ -76,7 +84,8 @@ impl HttpResponse {
         }
 
         // Extract Content-Length if present
-        let content_length = headers.get("content-length")
+        let content_length = headers
+            .get("content-length")
             .and_then(|v| v.parse::<usize>().ok());
 
         Ok(HttpResponse {
@@ -100,10 +109,10 @@ impl HttpResponse {
         for rule in rules {
             match rule.evaluate(self.status_code, self.content_length) {
                 RuleResult::Allow => {
-                    return Ok(());  // Explicitly allowed
+                    return Ok(()); // Explicitly allowed
                 }
                 RuleResult::Deny(reason) => {
-                    return Err(reason);  // Denied with reason
+                    return Err(reason); // Denied with reason
                 }
                 RuleResult::Continue => {
                     // Rule doesn't apply, check next rule

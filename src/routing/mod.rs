@@ -3,7 +3,8 @@
 //! Handles matching incoming requests to configured routes
 //! and rewriting paths when necessary.
 
-use crate::config::{CompiledRoute, CompiledListener};
+use crate::config::{CompiledListener, CompiledRoute};
+use tracing::debug;
 
 /// Result of route matching
 pub struct RouteMatch<'a> {
@@ -12,11 +13,19 @@ pub struct RouteMatch<'a> {
 }
 
 /// Match a request path against routes in order
-pub fn match_route<'a>(
-    listener: &'a CompiledListener,
-    path: &str,
-) -> Option<RouteMatch<'a>> {
+pub fn match_route<'a>(listener: &'a CompiledListener, path: &str) -> Option<RouteMatch<'a>> {
+    debug!(
+        path,
+        routes = listener.routes.len(),
+        "Attempting to match route"
+    );
     for route in &listener.routes {
+        debug!(
+            route_name = route.name.as_deref().unwrap_or("unnamed"),
+            prefix = ?route.path_prefix,
+            regex = route.path_pattern.as_ref().map(|p| p.as_str()),
+            "Evaluating route"
+        );
         if let Some(rewritten_path) = matches_route(route, path) {
             return Some(RouteMatch {
                 route,
@@ -32,6 +41,7 @@ fn matches_route(route: &CompiledRoute, path: &str) -> Option<String> {
     // Try prefix matching first
     if let Some(prefix) = &route.path_prefix {
         if path.starts_with(prefix) {
+            debug!(%path, %prefix, "Matched path prefix");
             let rewritten = if route.strip_prefix {
                 // Remove the prefix
                 let stripped = path.strip_prefix(prefix).unwrap_or(path);
@@ -47,15 +57,17 @@ fn matches_route(route: &CompiledRoute, path: &str) -> Option<String> {
             return Some(rewritten);
         }
     }
-    
+
     // Try regex matching
     if let Some(pattern) = &route.path_pattern {
         if pattern.is_match(path) {
+            debug!(%path, regex = pattern.as_str(), "Matched regex");
             // Regex matches don't support strip_prefix
             return Some(path.to_string());
         }
     }
-    
+
+    debug!(%path, "No route match");
     None
 }
 
@@ -73,7 +85,7 @@ mod tests {
     use super::*;
     use crate::config::{CompiledRoute, TlsSettings};
     use regex::Regex;
-    
+
     #[test]
     fn test_prefix_match() {
         let route = CompiledRoute {
@@ -86,11 +98,11 @@ mod tests {
             request_rules: vec![],
             response_rules: vec![],
         };
-        
+
         assert!(matches_route(&route, "/api/v1/users").is_some());
         assert!(matches_route(&route, "/api/v2/users").is_none());
     }
-    
+
     #[test]
     fn test_prefix_strip() {
         let route = CompiledRoute {
@@ -103,14 +115,14 @@ mod tests {
             request_rules: vec![],
             response_rules: vec![],
         };
-        
+
         let rewritten = matches_route(&route, "/api/v1/users").unwrap();
         assert_eq!(rewritten, "/users");
-        
+
         let rewritten = matches_route(&route, "/api/v1").unwrap();
         assert_eq!(rewritten, "/");
     }
-    
+
     #[test]
     fn test_regex_match() {
         let route = CompiledRoute {
@@ -123,7 +135,7 @@ mod tests {
             request_rules: vec![],
             response_rules: vec![],
         };
-        
+
         assert!(matches_route(&route, "/api/v1/users").is_some());
         assert!(matches_route(&route, "/api/v2/users").is_some());
         assert!(matches_route(&route, "/api/v3/users").is_none());
