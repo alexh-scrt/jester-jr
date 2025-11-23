@@ -392,8 +392,20 @@ fn handle_tls_connection_with_routing(
     // Perform TLS handshake
     let mut client_stream_clone = client_stream.try_clone()?;
 
-    // Complete TLS handshake
+    // Complete TLS handshake with timeout
+    let handshake_start = std::time::Instant::now();
+    let handshake_timeout = std::time::Duration::from_secs(10); // 10 second handshake timeout
+    
+    debug!("Starting TLS handshake loop, is_handshaking: {}", tls_conn.is_handshaking());
     while tls_conn.is_handshaking() {
+        // Check handshake timeout
+        if handshake_start.elapsed() > handshake_timeout {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TLS handshake timeout",
+            ));
+        }
+
         // Read TLS handshake data from client
         match tls_conn.read_tls(&mut client_stream_clone) {
             Ok(0) => {
@@ -405,6 +417,7 @@ fn handle_tls_connection_with_routing(
             Ok(_) => {
                 // Process the received handshake data
                 if let Err(e) = tls_conn.process_new_packets() {
+                    warn!("TLS process_new_packets error: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("TLS handshake error: {}", e),
@@ -413,21 +426,28 @@ fn handle_tls_connection_with_routing(
 
                 // Send TLS handshake response back to client
                 if let Err(e) = tls_conn.write_tls(&mut client_stream_clone) {
+                    warn!("TLS write_tls error: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("Failed to write TLS handshake response: {}", e),
                     ));
                 }
+                
+                // Force flush the TCP stream to ensure handshake data is sent immediately
+                if let Err(e) = client_stream_clone.flush() {
+                    warn!("Failed to flush TLS handshake data: {}", e);
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // This is normal for non-blocking I/O - continue trying
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                // This is normal for non-blocking I/O - continue trying with a brief sleep
+                std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
             }
             Err(e) => return Err(e),
         }
     }
 
+    debug!("TLS handshake loop completed, is_handshaking: {}", tls_conn.is_handshaking());
     info!("🔒 TLS handshake complete with {}", peer_addr);
 
     // Create a wrapper for reading decrypted data
@@ -1327,6 +1347,14 @@ fn handle_tls_connection(
 }
 
 /// Helper struct for reading decrypted TLS data
+/// 
+/// CRITICAL: This reader handles the TLS decryption flow:
+/// 1. read_tls() - Reads encrypted bytes from TCP socket
+/// 2. process_new_packets() - Decrypts bytes into internal buffer
+/// 3. conn.reader().read() - Reads decrypted data from internal buffer
+/// 
+/// IMPORTANT: Never return WouldBlock without attempting read_tls() first!
+/// See docs/TLS_READER_DEBUGGING.md for detailed implementation notes.
 struct TlsReader {
     conn: ServerConnection,
     stream: TcpStream,
@@ -1346,15 +1374,31 @@ impl Read for TlsReader {
             return Ok(to_copy);
         }
 
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5); // 5 second timeout
+        
+        debug!("TLS read() starting, waiting for data...");
         loop {
+            // Check timeout
+            if start.elapsed() > timeout {
+                debug!("TLS read() timeout after {:?}", start.elapsed());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut, 
+                    "TLS read timeout - no data received"
+                ));
+            }
+
             // Try to read decrypted data directly
             match self.conn.reader().read(buf) {
-                Ok(n) if n > 0 => return Ok(n),
+                Ok(n) if n > 0 => {
+                    debug!("TLS read() got {} bytes of data", n);
+                    return Ok(n);
+                }
                 Ok(_) => {
                     // No decrypted data available, need to read more TLS data
                     match self.conn.read_tls(&mut self.stream) {
                         Ok(0) => {
-                            // Connection closed
+                            debug!("TLS read() connection closed");
                             return Ok(0);
                         }
                         Ok(_) => {
@@ -1366,11 +1410,18 @@ impl Read for TlsReader {
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             // This is normal for non-blocking I/O - wait briefly and continue
-                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            debug!("TLS read() WouldBlock, retrying... (elapsed: {:?})", start.elapsed());
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
                         }
                         Err(e) => return Err(e),
                     }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Handle WouldBlock at the reader level too
+                    debug!("TLS read() direct WouldBlock, retrying... (elapsed: {:?})", start.elapsed());
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
                 }
                 Err(e) => return Err(e),
             }
@@ -1389,11 +1440,25 @@ impl std::io::BufRead for TlsReader {
         self.buffer.clear();
         self.buffer_pos = 0;
 
-        // Read more data from TLS connection
+        // Read more data from TLS connection with timeout
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5); // 5 second timeout
+        
+        debug!("TLS fill_buf starting, waiting for data...");
         loop {
+            // Check timeout
+            if start.elapsed() > timeout {
+                debug!("TLS fill_buf timeout after {:?}", start.elapsed());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut, 
+                    "TLS fill_buf timeout - no data received"
+                ));
+            }
+
             let mut temp_buf = [0u8; 1024];
             match self.conn.reader().read(&mut temp_buf) {
                 Ok(n) if n > 0 => {
+                    debug!("TLS fill_buf got {} bytes of data", n);
                     self.buffer.extend_from_slice(&temp_buf[..n]);
                     return Ok(&self.buffer[..]);
                 }
@@ -1412,7 +1477,33 @@ impl std::io::BufRead for TlsReader {
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             // This is normal for non-blocking I/O - wait briefly and continue
-                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            debug!("TLS fill_buf WouldBlock, retrying... (elapsed: {:?})", start.elapsed());
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // CRITICAL: WouldBlock from conn.reader() means no decrypted data available,
+                    // but encrypted data may be waiting in TCP socket. Must attempt read_tls()!
+                    // See docs/TLS_READER_DEBUGGING.md for why this is essential.
+                    debug!("TLS fill_buf conn.reader() WouldBlock, reading more TLS data... (elapsed: {:?})", start.elapsed());
+                    match self.conn.read_tls(&mut self.stream) {
+                        Ok(0) => {
+                            // Connection closed
+                            return Ok(&[]);
+                        }
+                        Ok(_) => {
+                            self.conn.process_new_packets().map_err(|e| {
+                                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+                            })?;
+                            // Continue loop to try reading again
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // This is normal for non-blocking I/O - wait briefly and continue
+                            debug!("TLS fill_buf read_tls WouldBlock, retrying... (elapsed: {:?})", start.elapsed());
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
                         }
                         Err(e) => return Err(e),
