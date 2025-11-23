@@ -1462,6 +1462,10 @@ impl std::io::BufRead for TlsReader {
                     self.buffer.extend_from_slice(&temp_buf[..n]);
                     return Ok(&self.buffer[..]);
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
                 Ok(_) => {
                     // Need more TLS data
                     match self.conn.read_tls(&mut self.stream) {
