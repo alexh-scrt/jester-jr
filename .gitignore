@@ -1,0 +1,5 @@
+docs/implementation*
+docs/IMPLEMENTAITON*
+.claude/
+target/
+build/
