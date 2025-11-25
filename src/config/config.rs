@@ -38,6 +38,10 @@ pub struct Config {
 
     #[serde(default)]
     pub response_rules: Vec<ResponseRule>,
+
+    /// Validator registry configuration (NEW in v0.2.1)
+    #[serde(default)]
+    pub validators: HashMap<String, ValidatorConfigEntry>,
 }
 
 /// Proxy server settings
@@ -79,6 +83,28 @@ pub struct GlobalSettings {
 
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+
+    #[serde(default = "default_blacklist_file")]
+    pub blacklist_file: String,
+
+    #[serde(default = "default_blacklist_ttl_hours")]
+    pub blacklist_ttl_hours: Option<u32>,
+
+    /// Enable automatic blacklisting of IPs that fail TLS handshake repeatedly
+    #[serde(default = "default_blacklist_failed_tls")]
+    pub blacklist_failed_tls: bool,
+
+    /// Number of TLS failures before blacklisting an IP
+    #[serde(default = "default_blacklist_failed_tls_attempts")]
+    pub blacklist_failed_tls_attempts: u32,
+
+    /// Time window in minutes for counting TLS failures
+    #[serde(default = "default_blacklist_failed_tls_attempts_in_min")]
+    pub blacklist_failed_tls_attempts_in_min: u32,
+
+    /// TTL in hours for blacklist entries created from TLS failures
+    #[serde(default = "default_blacklist_failed_tls_ttl_hours")]
+    pub blacklist_failed_tls_ttl_hours: u32,
 }
 
 impl Default for GlobalSettings {
@@ -86,6 +112,12 @@ impl Default for GlobalSettings {
         Self {
             log_level: "info".to_string(),
             timeout_seconds: 30,
+            blacklist_file: "./data/blacklist.json".to_string(),
+            blacklist_ttl_hours: Some(24),
+            blacklist_failed_tls: false,
+            blacklist_failed_tls_attempts: 3,
+            blacklist_failed_tls_attempts_in_min: 5,
+            blacklist_failed_tls_ttl_hours: 24,
         }
     }
 }
@@ -96,6 +128,30 @@ fn default_log_level() -> String {
 
 fn default_timeout() -> u64 {
     30
+}
+
+fn default_blacklist_file() -> String {
+    "./data/blacklist.json".to_string()
+}
+
+fn default_blacklist_ttl_hours() -> Option<u32> {
+    Some(24) // 24 hours default
+}
+
+fn default_blacklist_failed_tls() -> bool {
+    false
+}
+
+fn default_blacklist_failed_tls_attempts() -> u32 {
+    3
+}
+
+fn default_blacklist_failed_tls_attempts_in_min() -> u32 {
+    5
+}
+
+fn default_blacklist_failed_tls_ttl_hours() -> u32 {
+    24
 }
 
 /// Configuration for a single listener
@@ -155,6 +211,10 @@ pub struct RouteConfig {
 
     #[serde(default)]
     pub response_rules: Vec<ResponseRule>,
+
+    /// Validators to apply to this route (NEW in v0.2.1)
+    #[serde(default)]
+    pub validators: Vec<RouteValidatorConfig>,
 }
 
 /// Request filtering rule (from TOML)
@@ -235,6 +295,7 @@ pub struct CompiledRoute {
     pub timeout_seconds: u64,
     pub request_rules: Vec<CompiledRequestRule>,
     pub response_rules: Vec<CompiledResponseRule>,
+    pub validators: Vec<RouteValidatorConfig>,
 }
 
 /// Result of evaluating a rule
@@ -487,6 +548,7 @@ impl Config {
             timeout_seconds,
             request_rules,
             response_rules,
+            validators: route.validators.clone(),
         })
     }
 
@@ -562,6 +624,7 @@ impl Config {
                     timeout_seconds: Some(proxy.timeout_seconds),
                     request_rules: vec![],
                     response_rules: vec![],
+                    validators: vec![],
                 });
 
                 self.listener.insert("default".to_string(), listener_config);
@@ -837,4 +900,43 @@ key_file = "./certs/key.pem"
         let result = rule.evaluate(200, Some(500));
         assert_eq!(result, RuleResult::Continue);
     }
+}
+
+/// Validator configuration entry in TOML
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValidatorConfigEntry {
+    #[serde(rename = "type")]
+    pub validator_type: String,
+    
+    #[serde(default)]
+    pub path: Option<String>,
+    
+    #[serde(default)]
+    pub config: serde_json::Value,
+    
+    #[serde(default = "default_validator_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_validator_timeout() -> u64 {
+    5
+}
+
+/// Route-level validator configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouteValidatorConfig {
+    /// Validator name (from registry)
+    pub validator: String,
+    
+    /// What to do on validation failure
+    #[serde(default = "default_on_failure")]
+    pub on_failure: String, // "deny" | "allow" | "continue"
+    
+    /// Override config for this route
+    #[serde(default)]
+    pub override_config: Option<serde_json::Value>,
+}
+
+fn default_on_failure() -> String {
+    "deny".to_string()
 }

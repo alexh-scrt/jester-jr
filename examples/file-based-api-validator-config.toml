@@ -1,0 +1,66 @@
+# Jester Jr Configuration with File-Based API Key Validation
+# Generated from master_keys.txt with 10 keys
+
+[global]
+log_level = "info"
+timeout_seconds = 30
+
+# ═══════════════════════════════════════════════════════════
+# VALIDATOR REGISTRY
+# ═══════════════════════════════════════════════════════════
+
+# File-based API key validator configuration
+[validators.file_api_key]
+type = "wasm"
+path = "./validators/simple_api_validator.wasm"
+timeout_seconds = 5
+config = {
+  "valid_keys": [
+    "sk-prod-abc123def456ghi789",
+    "sk-staging-xyz789uvw456rst123",
+    "api-key-customer-1-secure-token-2024",
+    "api-key-customer-2-secure-token-2024",
+    "development-key-local-testing-only",
+    "test-api-key-for-integration-tests",
+    "sk-demo-quick-start-example-key",
+    "api-mobile-app-v1-authentication",
+    "api-web-dashboard-backend-service",
+    "api-third-party-integration-webhook"
+  ],
+  "header_name": "x-api-key",
+  "case_sensitive": true
+}
+
+# ═══════════════════════════════════════════════════════════
+# LISTENERS WITH VALIDATORS  
+# ═══════════════════════════════════════════════════════════
+
+[listener."api"]
+ip = "0.0.0.0"
+port = 8080
+default_action = "reject"
+
+# Protected API route requiring valid API key from master_keys.txt
+[[listener."api".routes]]
+name = "protected-api"
+path_prefix = "/api/protected"
+backend = "127.0.0.1:9091"
+strip_prefix = true
+
+[[listener."api".routes.validators]]
+validator = "file_api_key"
+on_failure = "deny"
+
+# Public API route (no validation required)
+[[listener."api".routes]]
+name = "public-api"
+path_prefix = "/api/public"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+# Health check (no validation)
+[[listener."api".routes]]
+name = "health"
+path_prefix = "/health"
+backend = "127.0.0.1:9090"
+strip_prefix = false

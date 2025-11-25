@@ -1,0 +1,13 @@
+# Master API Keys Database
+# One API key per line
+# Lines starting with # are ignored
+sk-prod-abc123def456ghi789
+sk-staging-xyz789uvw456rst123
+api-key-customer-1-secure-token-2024
+api-key-customer-2-secure-token-2024
+development-key-local-testing-only
+test-api-key-for-integration-tests
+sk-demo-quick-start-example-key
+api-mobile-app-v1-authentication
+api-web-dashboard-backend-service
+api-third-party-integration-webhook

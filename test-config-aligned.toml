@@ -1,0 +1,180 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jester Jr Configuration - Aligned with curl_tests.sh
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# This configuration is specifically designed to work with curl_tests.sh
+# All routes and validators match the test expectations exactly.
+#
+# Usage:
+# 1. Start backend: python3 ./backend_server.py  
+# 2. Start jester-jr: ./target/debug/jester-jr test-config-aligned.toml
+# 3. Run tests: ./curl_tests.sh
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[global]
+log_level = "info"
+timeout_seconds = 30
+blacklist_file = "./clean-blacklist.json"
+blacklist_ttl_hours = 1  # Short TTL for testing (1 hour)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VALIDATOR REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# API Key validator for /api/public/* routes
+[validators.api_key]
+type = "builtin"
+
+[validators.api_key.config]
+valid_keys = ["test-key-123", "dev-key-456"]
+header_name = "x-api-key"
+
+# Jester-Secret validator for /api/secure/* routes
+[validators.jester_secret]
+type = "builtin"
+
+[validators.jester_secret.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 1  # Short TTL for testing (1 hour)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN LISTENER (Port 8090)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."main"]
+ip = "127.0.0.1"
+port = 8090
+description = "Main HTTP listener for curl tests"
+default_action = "reject"
+
+# No TLS for testing simplicity
+[listener."main".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Global listener rules (apply to ALL routes)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Block dangerous HTTP methods globally
+[[listener."main".request_rules]]
+name = "Block dangerous methods"
+action = "deny"
+methods = ["DELETE", "TRACE", "TRACK", "CONNECT"]
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ROUTE DEFINITIONS (Order matters - first match wins)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: Health check endpoint (no authentication required)
+# Matches: GET /health
+[[listener."main".routes]]
+name = "health-check"
+path_prefix = "/health"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+[[listener."main".routes.request_rules]]
+name = "Allow health check"
+action = "allow"
+
+# Route 2: Public API endpoints (requires API key)
+# Matches: /api/public/* (with x-api-key header)
+[[listener."main".routes]]
+name = "public-api"
+path_prefix = "/api/public"
+backend = "127.0.0.1:9090"
+strip_prefix = true  # /api/public/users -> /users
+
+[[listener."main".routes.validators]]
+validator = "api_key"
+on_failure = "deny"
+
+[[listener."main".routes.request_rules]]
+name = "Allow standard methods for API"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+# Route 3: Secure API endpoints (requires Jester-Secret)
+# Matches: /api/secure/* (with jester-secret header)
+[[listener."main".routes]]
+name = "secure-api"
+path_prefix = "/api/secure"
+backend = "127.0.0.1:9090"
+strip_prefix = true  # /api/secure/data -> /data
+
+[[listener."main".routes.validators]]
+validator = "jester_secret"
+on_failure = "deny"
+
+[[listener."main".routes.request_rules]]
+name = "Allow standard methods for secure API"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+# Route 4: Catch-all route for basic requests (no authentication)
+# Matches: /* (everything else)
+# This handles /test, long paths, query params, etc.
+[[listener."main".routes]]
+name = "catch-all"
+path_prefix = "/"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+[[listener."main".routes.request_rules]]
+name = "Allow safe methods for basic requests"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+[[listener."main".routes.request_rules]]
+name = "Block dangerous methods on catch-all"
+action = "deny"
+methods = ["DELETE", "TRACE", "TRACK"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROUTE BEHAVIOR SUMMARY
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# curl http://127.0.0.1:8090/health
+# → Route: health-check, No auth required, Backend: 127.0.0.1:9090/health
+#
+# curl http://127.0.0.1:8090/test
+# → Route: catch-all, No auth required, Backend: 127.0.0.1:9090/test
+#
+# curl -H "x-api-key: test-key-123" http://127.0.0.1:8090/api/public/users
+# → Route: public-api, API key required, Backend: 127.0.0.1:9090/users (stripped)
+#
+# curl -H "jester-secret: FVDRuKEZw4LBnLxVkWjD" http://127.0.0.1:8090/api/secure/data  
+# → Route: secure-api, Jester-Secret required, Backend: 127.0.0.1:9090/data (stripped)
+#
+# curl -X DELETE http://127.0.0.1:8090/test
+# → Blocked by global dangerous methods rule
+#
+# curl -X POST http://127.0.0.1:8090/test
+# → Route: catch-all, Allowed, Backend: 127.0.0.1:9090/test
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPECTED TEST RESULTS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ✅ SHOULD PASS:
+# - Health check: GET /health (no auth)
+# - Basic requests: GET/POST/PUT/PATCH /test (no auth) 
+# - API key requests: GET/POST/PUT/PATCH /api/public/* with valid x-api-key
+# - Secure requests: GET/POST/PUT/PATCH /api/secure/* with valid jester-secret
+# - Long paths, query params: GET /very/long/path?param=value (catch-all)
+# - Custom headers forwarding
+#
+# ❌ SHOULD FAIL:
+# - API requests without valid keys (401/403)
+# - Secure requests without valid secrets (401/403)  
+# - DELETE/TRACE methods (blocked globally)
+# - Invalid API keys or secrets
+#
+# ═══════════════════════════════════════════════════════════════════════════════

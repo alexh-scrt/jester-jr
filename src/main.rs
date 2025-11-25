@@ -23,13 +23,19 @@ use tracing::{debug, error, info, instrument, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
+mod blacklist;
 mod config;
 mod parsers;
 mod routing;
 mod tls;
+mod tls_failure_tracker;
+mod validators;
 
-use config::{CompiledListener, CompiledRequestRule, CompiledResponseRule, Config};
+use blacklist::IpBlacklist;
+use config::{CompiledListener, CompiledRequestRule, CompiledResponseRule, Config, RouteValidatorConfig};
 use parsers::{HttpRequest, HttpResponse};
+use tls_failure_tracker::{TlsFailureTracker, TlsFailureConfig, classify_tls_error};
+use validators::{ValidationContext, ValidationResult, ValidatorRegistry};
 
 const APP_LOG_DIRECTIVE: &str = "jester-jr=info";
 
@@ -71,6 +77,12 @@ fn main() {
 
     init_tracing(None);
 
+    // Create async runtime for validators
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create async runtime");
+
     info!("🔧 Loading configuration from: {}", config_path);
 
     let mut config = match Config::from_file(config_path) {
@@ -88,6 +100,70 @@ fn main() {
     if let Err(e) = config.validate() {
         error!("❌ Configuration validation failed: {}", e);
         std::process::exit(1);
+    }
+
+    // Initialize validator registry
+    info!("🔧 Initializing validator registry");
+    let mut validator_registry = ValidatorRegistry::new();
+    
+    // Convert config format to validator config format
+    let validator_configs: std::collections::HashMap<String, validators::ValidatorConfig> = config
+        .validators
+        .iter()
+        .map(|(name, entry)| {
+            let validator_type = match entry.validator_type.as_str() {
+                "builtin" => validators::ValidatorType::Builtin,
+                "script" => validators::ValidatorType::Script,
+                "wasm" => validators::ValidatorType::Wasm,
+                "dylib" => validators::ValidatorType::Dylib,
+                _ => validators::ValidatorType::Builtin, // default fallback
+            };
+
+            let validator_config = validators::ValidatorConfig {
+                name: name.clone(),
+                validator_type,
+                path: entry.path.clone(),
+                config: entry.config.clone(),
+                timeout_seconds: entry.timeout_seconds,
+            };
+
+            (name.clone(), validator_config)
+        })
+        .collect();
+
+    // Load validators asynchronously
+    if !validator_configs.is_empty() {
+        if let Err(e) = rt.block_on(validator_registry.load_from_config(&validator_configs)) {
+            error!("❌ Failed to load validators: {}", e);
+            std::process::exit(1);
+        }
+        info!("✅ Loaded {} validator(s)", validator_configs.len());
+    }
+
+    // Initialize IP blacklist
+    info!("🔧 Initializing IP blacklist");
+    let blacklist = Arc::new(IpBlacklist::new(
+        config.global.blacklist_file.clone(),
+        config.global.blacklist_ttl_hours,
+    ));
+
+    // Initialize TLS failure tracker
+    info!("🔧 Initializing TLS failure tracker");
+    let tls_failure_config = TlsFailureConfig {
+        enabled: config.global.blacklist_failed_tls,
+        max_attempts: config.global.blacklist_failed_tls_attempts,
+        time_window_minutes: config.global.blacklist_failed_tls_attempts_in_min,
+        blacklist_ttl_hours: config.global.blacklist_failed_tls_ttl_hours,
+    };
+    let tls_failure_tracker = Arc::new(TlsFailureTracker::new(tls_failure_config));
+    
+    if config.global.blacklist_failed_tls {
+        info!("✅ TLS failure tracking enabled: {} failures in {} minutes → blacklist for {} hours",
+              config.global.blacklist_failed_tls_attempts,
+              config.global.blacklist_failed_tls_attempts_in_min,
+              config.global.blacklist_failed_tls_ttl_hours);
+    } else {
+        info!("ℹ️  TLS failure tracking disabled");
     }
 
     // Compile all listeners
@@ -110,14 +186,20 @@ fn main() {
     };
 
     // Start all listeners
-    if let Err(e) = run_multi_listeners(listeners) {
+    if let Err(e) = run_multi_listeners(listeners, Arc::new(validator_registry), Arc::new(rt), blacklist, tls_failure_tracker) {
         error!("❌ Server error: {}", e);
         std::process::exit(1);
     }
 }
 
-#[instrument(skip(listeners), level = "debug")]
-fn run_multi_listeners(listeners: Vec<CompiledListener>) -> Result<(), std::io::Error> {
+#[instrument(skip(listeners, validator_registry, runtime, blacklist, tls_failure_tracker), level = "debug")]
+fn run_multi_listeners(
+    listeners: Vec<CompiledListener>,
+    validator_registry: Arc<ValidatorRegistry>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    blacklist: Arc<IpBlacklist>,
+    tls_failure_tracker: Arc<TlsFailureTracker>,
+) -> Result<(), std::io::Error> {
     if listeners.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -129,8 +211,12 @@ fn run_multi_listeners(listeners: Vec<CompiledListener>) -> Result<(), std::io::
 
     for listener in listeners {
         debug!(listener = %listener.name, "Starting listener thread");
+        let validator_registry_clone = Arc::clone(&validator_registry);
+        let runtime_clone = Arc::clone(&runtime);
+        let blacklist_clone = Arc::clone(&blacklist);
+        let tls_failure_tracker_clone = Arc::clone(&tls_failure_tracker);
         let handle = thread::spawn(move || {
-            if let Err(e) = run_single_listener(listener) {
+            if let Err(e) = run_single_listener(listener, validator_registry_clone, runtime_clone, blacklist_clone, tls_failure_tracker_clone) {
                 error!("❌ Listener error: {}", e);
             }
         });
@@ -145,8 +231,114 @@ fn run_multi_listeners(listeners: Vec<CompiledListener>) -> Result<(), std::io::
     Ok(())
 }
 
-#[instrument(skip(listener))]
-fn run_single_listener(listener: CompiledListener) -> Result<(), std::io::Error> {
+/// Execute validators for a route and return the result
+async fn execute_route_validators(
+    request: &HttpRequest,
+    client_ip: std::net::IpAddr,
+    listener_name: &str,
+    route_name: Option<&str>,
+    validators: &[RouteValidatorConfig],
+    registry: &ValidatorRegistry,
+    blacklist: &IpBlacklist,
+) -> Result<ValidationResult, String> {
+    if validators.is_empty() {
+        return Ok(ValidationResult::Allow);
+    }
+
+    debug!("🔍 Executing {} validators for route", validators.len());
+    
+    for validator_config in validators {
+        let validator = registry.get(&validator_config.validator)
+            .ok_or_else(|| format!("Validator '{}' not found", validator_config.validator))?;
+
+        // Create validation context
+        let config = validator_config.override_config.clone()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+        let ctx = ValidationContext::from_request(
+            request,
+            client_ip,
+            listener_name.to_string(),
+            route_name.map(|s| s.to_string()),
+            config,
+            registry.state(),
+        );
+
+        // Execute validator
+        match validator.validate(&ctx).await {
+            Ok(ValidationResult::Allow) => {
+                debug!("✅ Validator '{}' passed", validator_config.validator);
+                continue;
+            }
+            Ok(ValidationResult::AllowWithModification { .. }) => {
+                debug!("✅ Validator '{}' passed with modifications", validator_config.validator);
+                // TODO: Apply modifications to request
+                continue;
+            }
+            Ok(result @ ValidationResult::Deny { .. }) => {
+                warn!("🚫 Validator '{}' denied request", validator_config.validator);
+                match validator_config.on_failure.as_str() {
+                    "deny" => return Ok(result),
+                    "allow" => continue,
+                    "continue" => continue,
+                    _ => return Ok(result),
+                }
+            }
+            Ok(ValidationResult::BlacklistIP { ip, reason, ttl_hours, .. }) => {
+                warn!("🚫 Validator '{}' triggered IP blacklist for {}: {}", validator_config.validator, ip, reason);
+                
+                // Add IP to blacklist
+                if let Err(e) = blacklist.add_ip(ip, reason.clone(), ttl_hours) {
+                    error!("Failed to add IP {} to blacklist: {}", ip, e);
+                }
+                
+                // Always deny when blacklisting is triggered, regardless of on_failure setting
+                return Ok(ValidationResult::BlacklistIP { ip, reason, ttl_hours, status_code: 403, log_level: validators::LogLevel::Warn, internal_message: None });
+            }
+            Err(e) => {
+                error!("⚠️ Validator '{}' error: {}", validator_config.validator, e);
+                match validator_config.on_failure.as_str() {
+                    "deny" => return Ok(ValidationResult::Deny {
+                        status_code: 500,
+                        reason: "Internal validation error".to_string(),
+                        log_level: validators::LogLevel::Error,
+                        internal_message: Some(e.to_string()),
+                    }),
+                    "allow" => continue,
+                    "continue" => continue,
+                    _ => return Err(e.to_string()),
+                }
+            }
+        }
+    }
+
+    Ok(ValidationResult::Allow)
+}
+
+/// Get HTTP status text for a status code
+fn get_status_text(status_code: u16) -> &'static str {
+    match status_code {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
+#[instrument(skip(listener, validator_registry, runtime, blacklist, tls_failure_tracker))]
+fn run_single_listener(
+    listener: CompiledListener,
+    validator_registry: Arc<ValidatorRegistry>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    blacklist: Arc<IpBlacklist>,
+    tls_failure_tracker: Arc<TlsFailureTracker>,
+) -> Result<(), std::io::Error> {
     let listen_addr = format!("{}:{}", listener.ip, listener.port);
     let timeout = Duration::from_secs(listener.timeout_seconds);
     debug!(listener = %listener.name, %listen_addr, timeout_secs = listener.timeout_seconds, "Initializing listener");
@@ -204,6 +396,10 @@ fn run_single_listener(listener: CompiledListener) -> Result<(), std::io::Error>
             Ok(stream) => {
                 let listener_clone = Arc::clone(&listener_arc);
                 let tls_cfg_clone = tls_config.clone();
+                let validator_registry_clone = Arc::clone(&validator_registry);
+                let runtime_clone = Arc::clone(&runtime);
+                let blacklist_clone = Arc::clone(&blacklist);
+                let tls_failure_tracker_clone = Arc::clone(&tls_failure_tracker);
 
                 thread::spawn(move || {
                     if let Err(e) = handle_connection_with_routing(
@@ -212,6 +408,10 @@ fn run_single_listener(listener: CompiledListener) -> Result<(), std::io::Error>
                         timeout,
                         timeout,
                         tls_cfg_clone,
+                        validator_registry_clone,
+                        runtime_clone,
+                        blacklist_clone,
+                        tls_failure_tracker_clone,
                     ) {
                         warn!("⚠️  Error handling connection: {}", e);
                     }
@@ -226,15 +426,26 @@ fn run_single_listener(listener: CompiledListener) -> Result<(), std::io::Error>
     Ok(())
 }
 
-#[instrument(skip(client_stream, listener, tls_config))]
+#[instrument(skip(client_stream, listener, tls_config, tls_failure_tracker))]
 fn handle_connection_with_routing(
     client_stream: TcpStream,
     listener: Arc<CompiledListener>,
     read_timeout: Duration,
     write_timeout: Duration,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    validator_registry: Arc<ValidatorRegistry>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    blacklist: Arc<IpBlacklist>,
+    tls_failure_tracker: Arc<TlsFailureTracker>,
 ) -> Result<(), std::io::Error> {
     let peer_addr = client_stream.peer_addr()?;
+    
+    // Check if IP is blacklisted
+    if blacklist.is_blacklisted(peer_addr.ip()) {
+        warn!("🚫 Dropping connection from blacklisted IP: {}", peer_addr.ip());
+        return Ok(());
+    }
+    
     info!(
         "\n✨ New connection from: {} [{}]",
         peer_addr, listener.name
@@ -250,18 +461,35 @@ fn handle_connection_with_routing(
             read_timeout,
             write_timeout,
             tls_cfg,
+            validator_registry,
+            runtime,
+            blacklist,
+            tls_failure_tracker,
         )
     } else {
-        handle_plain_connection_with_routing(client_stream, listener, read_timeout, write_timeout)
+        handle_plain_connection_with_routing(
+            client_stream, 
+            listener, 
+            read_timeout, 
+            write_timeout,
+            validator_registry,
+            runtime,
+            blacklist,
+            tls_failure_tracker,
+        )
     }
 }
 
-#[instrument(skip(client_stream, listener))]
+#[instrument(skip(client_stream, listener, validator_registry, runtime, blacklist))]
 fn handle_plain_connection_with_routing(
     client_stream: TcpStream,
     listener: Arc<CompiledListener>,
     read_timeout: Duration,
     write_timeout: Duration,
+    validator_registry: Arc<ValidatorRegistry>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    blacklist: Arc<IpBlacklist>,
+    _tls_failure_tracker: Arc<TlsFailureTracker>,
 ) -> Result<(), std::io::Error> {
     let peer_addr = client_stream.peer_addr()?;
     info!("✨ New connection from: {} [{}]", peer_addr, listener.name);
@@ -348,6 +576,62 @@ fn handle_plain_connection_with_routing(
         return Ok(());
     }
 
+    // Execute route validators
+    if !route_match.route.validators.is_empty() {
+        match runtime.block_on(execute_route_validators(
+            &request,
+            peer_addr.ip(),
+            &listener.name,
+            Some(&route_match.route.name.as_deref().unwrap_or("unnamed")),
+            &route_match.route.validators,
+            &validator_registry,
+            &blacklist,
+        )) {
+            Ok(ValidationResult::Allow) => {
+                debug!("✅ All validators passed for route '{}'", route_name);
+            }
+            Ok(ValidationResult::AllowWithModification { .. }) => {
+                debug!("✅ All validators passed with modifications for route '{}'", route_name);
+                // TODO: Apply modifications to request
+            }
+            Ok(ValidationResult::Deny { status_code, reason, .. }) => {
+                warn!("🚫 Validator denied request for route '{}': {}", route_name, reason);
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                    status_code,
+                    get_status_text(status_code),
+                    reason.len(),
+                    reason
+                );
+                client_writer.write_all(response.as_bytes())?;
+                return Ok(());
+            }
+            Ok(ValidationResult::BlacklistIP { status_code, reason, .. }) => {
+                warn!("🚫 Validator triggered IP blacklist for route '{}': {}", route_name, reason);
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                    status_code,
+                    get_status_text(status_code),
+                    reason.len(),
+                    reason
+                );
+                client_writer.write_all(response.as_bytes())?;
+                return Ok(());
+            }
+            Err(e) => {
+                error!("❌ Validator error for route '{}': {}", route_name, e);
+                let reason = "Internal validation error";
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+                    reason.len(),
+                    reason
+                );
+                client_writer.write_all(response.as_bytes())?;
+                return Ok(());
+            }
+        }
+    }
+
     // Forward to matched backend with rewritten path
     forward_to_backend_with_path(
         &request,
@@ -361,37 +645,13 @@ fn handle_plain_connection_with_routing(
     )
 }
 
-#[instrument(skip(client_stream, listener, tls_config))]
-fn handle_tls_connection_with_routing(
-    client_stream: TcpStream,
-    listener: Arc<CompiledListener>,
-    read_timeout: Duration,
-    write_timeout: Duration,
-    tls_config: Arc<rustls::ServerConfig>,
-) -> Result<(), std::io::Error> {
-    let peer_addr = client_stream.peer_addr()?;
-    info!(
-        "✨ New TLS connection from: {} [{}]",
-        peer_addr, listener.name
-    );
-
-    // Set timeouts
-    client_stream.set_read_timeout(Some(read_timeout))?;
-    client_stream.set_write_timeout(Some(write_timeout))?;
-
-    // Create TLS server connection
-    let mut tls_conn = ServerConnection::new(tls_config).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("TLS setup failed: {}", e),
-        )
-    })?;
-
-    info!("🔒 Performing TLS handshake with {}...", peer_addr);
-
-    // Perform TLS handshake
-    let mut client_stream_clone = client_stream.try_clone()?;
-
+/// Perform TLS handshake with proper error handling
+/// Returns the cloned stream on success for continued use
+fn perform_tls_handshake(
+    tls_conn: &mut ServerConnection,
+    client_stream: &mut TcpStream,
+    _peer_addr: std::net::SocketAddr,
+) -> Result<TcpStream, std::io::Error> {
     // Complete TLS handshake with timeout
     let handshake_start = std::time::Instant::now();
     let handshake_timeout = std::time::Duration::from_secs(10); // 10 second handshake timeout
@@ -407,7 +667,7 @@ fn handle_tls_connection_with_routing(
         }
 
         // Read TLS handshake data from client
-        match tls_conn.read_tls(&mut client_stream_clone) {
+        match tls_conn.read_tls(client_stream) {
             Ok(0) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -425,7 +685,7 @@ fn handle_tls_connection_with_routing(
                 }
 
                 // Send TLS handshake response back to client
-                if let Err(e) = tls_conn.write_tls(&mut client_stream_clone) {
+                if let Err(e) = tls_conn.write_tls(client_stream) {
                     warn!("TLS write_tls error: {}", e);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -434,7 +694,7 @@ fn handle_tls_connection_with_routing(
                 }
                 
                 // Force flush the TCP stream to ensure handshake data is sent immediately
-                if let Err(e) = client_stream_clone.flush() {
+                if let Err(e) = client_stream.flush() {
                     warn!("Failed to flush TLS handshake data: {}", e);
                 }
             }
@@ -448,12 +708,102 @@ fn handle_tls_connection_with_routing(
     }
 
     debug!("TLS handshake loop completed, is_handshaking: {}", tls_conn.is_handshaking());
+    
+    // Return the stream for continued use
+    client_stream.try_clone()
+}
+
+#[instrument(skip(client_stream, listener, tls_config, validator_registry, runtime, blacklist, tls_failure_tracker))]
+fn handle_tls_connection_with_routing(
+    client_stream: TcpStream,
+    listener: Arc<CompiledListener>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    tls_config: Arc<rustls::ServerConfig>,
+    validator_registry: Arc<ValidatorRegistry>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    blacklist: Arc<IpBlacklist>,
+    tls_failure_tracker: Arc<TlsFailureTracker>,
+) -> Result<(), std::io::Error> {
+    let peer_addr = client_stream.peer_addr()?;
+    info!(
+        "✨ New TLS connection from: {} [{}]",
+        peer_addr, listener.name
+    );
+
+    // Clean up expired TLS failure entries periodically
+    tls_failure_tracker.cleanup_expired();
+
+    // Early check: reject if this IP is already blacklisted due to TLS failures
+    if blacklist.is_blacklisted(peer_addr.ip()) {
+        warn!("🚫 Rejecting TLS connection from blacklisted IP: {}", peer_addr.ip());
+        return Ok(());
+    }
+
+    // Set timeouts
+    client_stream.set_read_timeout(Some(read_timeout))?;
+    client_stream.set_write_timeout(Some(write_timeout))?;
+
+    // Create TLS server connection
+    let mut tls_conn = ServerConnection::new(tls_config).map_err(|e| {
+        let error_msg = format!("TLS setup failed: {}", e);
+        let error_type = classify_tls_error(&error_msg);
+        
+        // Record TLS failure and check if we should blacklist
+        if tls_failure_tracker.record_failure(peer_addr.ip(), error_type) {
+            let ttl_hours = Some(tls_failure_tracker.config().blacklist_ttl_hours);
+            if let Err(blacklist_err) = blacklist.add_ip(
+                peer_addr.ip(), 
+                "Repeated TLS handshake failures".to_string(),
+                ttl_hours
+            ) {
+                warn!("Failed to blacklist IP {} after TLS failures: {}", peer_addr.ip(), blacklist_err);
+            } else {
+                warn!("🚫 Blacklisted IP {} due to repeated TLS failures", peer_addr.ip());
+            }
+        }
+        
+        std::io::Error::new(std::io::ErrorKind::Other, error_msg)
+    })?;
+
+    info!("🔒 Performing TLS handshake with {}...", peer_addr);
+
+    // Perform TLS handshake with failure tracking
+    let handshake_result = perform_tls_handshake(&mut tls_conn, &mut client_stream.try_clone()?, peer_addr);
+    
+    // Handle handshake failures with tracking
+    let client_stream_clone = match handshake_result {
+        Ok(stream) => stream,
+        Err(e) => {
+            let error_msg = e.to_string();
+            let error_type = classify_tls_error(&error_msg);
+            
+            debug!("TLS handshake failed for {}: {} (classified as: {})", peer_addr.ip(), error_msg, error_type);
+            
+            // Record TLS failure and check if we should blacklist
+            if tls_failure_tracker.record_failure(peer_addr.ip(), error_type) {
+                let ttl_hours = Some(tls_failure_tracker.config().blacklist_ttl_hours);
+                if let Err(blacklist_err) = blacklist.add_ip(
+                    peer_addr.ip(), 
+                    "Repeated TLS handshake failures".to_string(),
+                    ttl_hours
+                ) {
+                    warn!("Failed to blacklist IP {} after TLS failures: {}", peer_addr.ip(), blacklist_err);
+                } else {
+                    warn!("🚫 Blacklisted IP {} due to repeated TLS failures", peer_addr.ip());
+                }
+            }
+            
+            return Err(e);
+        }
+    };
+
     info!("🔒 TLS handshake complete with {}", peer_addr);
 
     // Create a wrapper for reading decrypted data
     let mut tls_reader = TlsReader {
         conn: tls_conn,
-        stream: client_stream,
+        stream: client_stream_clone,
         buffer: Vec::new(),
         buffer_pos: 0,
     };
@@ -470,10 +820,8 @@ fn handle_tls_connection_with_routing(
             let response = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request";
 
             // Send encrypted error response
-            let mut client_writer = client_stream_clone;
-            let mut conn = tls_reader.get_connection();
-            let _ = conn.writer().write_all(response);
-            let _ = conn.write_tls(&mut client_writer);
+            let _ = tls_reader.conn.writer().write_all(response);
+            let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
             return Ok(());
         }
     };
@@ -506,10 +854,8 @@ fn handle_tls_connection_with_routing(
                 );
                 let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
 
-                let mut client_writer = client_stream_clone;
-                let mut conn = tls_reader.get_connection();
-                let _ = conn.writer().write_all(response);
-                let _ = conn.write_tls(&mut client_writer);
+                let _ = tls_reader.conn.writer().write_all(response);
+                let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
                 return Ok(());
             }
         }
@@ -530,10 +876,8 @@ fn handle_tls_connection_with_routing(
             reason
         );
 
-        let mut client_writer = client_stream_clone;
-        let mut conn = tls_reader.get_connection();
-        let _ = conn.writer().write_all(response.as_bytes());
-        let _ = conn.write_tls(&mut client_writer);
+        let _ = tls_reader.conn.writer().write_all(response.as_bytes());
+        let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
         return Ok(());
     }
 
@@ -546,11 +890,68 @@ fn handle_tls_connection_with_routing(
             reason
         );
 
-        let mut client_writer = client_stream_clone;
-        let mut conn = tls_reader.get_connection();
-        let _ = conn.writer().write_all(response.as_bytes());
-        let _ = conn.write_tls(&mut client_writer);
+        let _ = tls_reader.conn.writer().write_all(response.as_bytes());
+        let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
         return Ok(());
+    }
+
+    // Execute route validators
+    if !route_match.route.validators.is_empty() {
+        match runtime.block_on(execute_route_validators(
+            &request,
+            peer_addr.ip(),
+            &listener.name,
+            Some(&route_match.route.name.as_deref().unwrap_or("unnamed")),
+            &route_match.route.validators,
+            &validator_registry,
+            &blacklist,
+        )) {
+            Ok(ValidationResult::Allow) => {
+                debug!("✅ All validators passed for route '{}'", route_name);
+            }
+            Ok(ValidationResult::AllowWithModification { .. }) => {
+                debug!("✅ All validators passed with modifications for route '{}'", route_name);
+                // TODO: Apply modifications to request
+            }
+            Ok(ValidationResult::Deny { status_code, reason, .. }) => {
+                warn!("🚫 Validator denied request for route '{}': {}", route_name, reason);
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                    status_code,
+                    get_status_text(status_code),
+                    reason.len(),
+                    reason
+                );
+                let _ = tls_reader.conn.writer().write_all(response.as_bytes());
+                let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
+                return Ok(());
+            }
+            Ok(ValidationResult::BlacklistIP { status_code, reason, .. }) => {
+                warn!("🚫 Validator triggered IP blacklist for route '{}': {}", route_name, reason);
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                    status_code,
+                    get_status_text(status_code),
+                    reason.len(),
+                    reason
+                );
+                let _ = tls_reader.conn.writer().write_all(response.as_bytes());
+                let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("❌ Validator error for route '{}': {}", route_name, e);
+                let reason = "Internal validation error";
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+                    reason.len(),
+                    reason
+                );
+                let _ = tls_reader.conn.writer().write_all(response.as_bytes());
+                let _ = tls_reader.conn.write_tls(&mut tls_reader.stream);
+                return Ok(());
+            }
+        }
     }
 
     // Forward to matched backend with rewritten path
@@ -1461,10 +1862,6 @@ impl std::io::BufRead for TlsReader {
                     debug!("TLS fill_buf got {} bytes of data", n);
                     self.buffer.extend_from_slice(&temp_buf[..n]);
                     return Ok(&self.buffer[..]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
                 }
                 Ok(_) => {
                     // Need more TLS data

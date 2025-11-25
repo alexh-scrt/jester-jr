@@ -1,0 +1,18 @@
+[package]
+name = "simple-api-validator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jester-jr-validator-sdk = { path = "../../validators/sdk" }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

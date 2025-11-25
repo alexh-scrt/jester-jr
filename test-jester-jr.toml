@@ -1,0 +1,439 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jester Jr v0.1.0 Release - Comprehensive Test Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# This configuration demonstrates ALL implemented functionality for release testing:
+# • Multi-listener architecture with different protocols and security levels
+# • TLS/HTTPS support with certificate validation
+# • Path-based routing (prefix, regex, strip_prefix)
+# • Request and response filtering with complex rule hierarchies
+# • Validator framework (API key, JWT, Jester-Secret, custom scripts)
+# • IP blacklisting (manual and automatic TLS-failure based)
+# • Global settings and per-listener/route overrides
+# 
+# Test coverage: HTTP, HTTPS, routing, filtering, validation, security, error handling
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[global]
+# Logging configuration for test visibility
+log_level = "debug"
+
+# Default timeout for all operations (overrideable per route)
+timeout_seconds = 30
+
+# IP blacklist configuration with persistent storage
+blacklist_file = "./data/blacklist.json"
+blacklist_ttl_hours = 24
+
+# TLS failure tracking and automatic blacklisting (NEW FEATURE)
+blacklist_failed_tls = true
+blacklist_failed_tls_attempts = 3
+blacklist_failed_tls_attempts_in_min = 5
+blacklist_failed_tls_ttl_hours = 24
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VALIDATOR REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Simple API key validator for public endpoints
+[validators.api_key]
+type = "builtin"
+
+[validators.api_key.config]
+valid_keys = ["test-key-123", "public-api-key", "dev-key-456"]
+header_name = "x-api-key"
+
+# JWT validator for protected endpoints
+[validators.jwt]
+type = "builtin"
+
+[validators.jwt.config]
+secret = "test-secret-for-jwt-validation"
+issuer = "jester-jr-test"
+audience = "api"
+algorithms = ["HS256"]
+
+# Jester-Secret validator with IP blacklisting for high-security endpoints
+[validators.jester_secret]
+type = "builtin"
+
+[validators.jester_secret.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD", "test-secret-key"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 24
+
+# Custom script validator (if Rhai script exists)
+[validators.header_check]
+type = "script"
+path = "./validators/examples/header_check.rhai"
+timeout_seconds = 5
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 1: Public HTTP API (Port 8080)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."public-http"]
+ip = "0.0.0.0"
+port = 8080
+description = "Public HTTP API for general testing"
+default_action = "reject"
+
+# No TLS for this listener - plain HTTP
+[listener."public-http".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Listener-level rules (apply to ALL routes)
+# ────────────────────────────────────────────────────────────────────────────────
+
+[[listener."public-http".request_rules]]
+name = "Block dangerous HTTP methods"
+action = "deny"
+methods = ["TRACE", "TRACK", "CONNECT", "DELETE"]
+
+[[listener."public-http".request_rules]]
+name = "Block direct admin access"
+action = "deny"
+path_regex = "^/admin/.*"
+
+[[listener."public-http".response_rules]]
+name = "Hide server errors from public"
+action = "deny"
+status_codes = [500, 501, 502, 503, 504]
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Routes for public HTTP listener
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: Health check (no authentication)
+[[listener."public-http".routes]]
+name = "health-check"
+path_prefix = "/health"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+timeout_seconds = 10
+
+[[listener."public-http".routes.request_rules]]
+name = "Allow GET for health"
+action = "allow"
+methods = ["GET"]
+
+# Route 2: Public API with API key validation
+[[listener."public-http".routes]]
+name = "public-api"
+path_prefix = "/api/v1/public"
+backend = "127.0.0.1:9091"
+strip_prefix = true
+timeout_seconds = 15
+
+[[listener."public-http".routes.validators]]
+validator = "api_key"
+on_failure = "deny"
+
+[[listener."public-http".routes.request_rules]]
+name = "Allow standard HTTP methods"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+# Route 3: Protected API with API key validation (different key)
+[[listener."public-http".routes]]
+name = "protected-api"
+path_prefix = "/api/v1/protected"
+backend = "127.0.0.1:9092"
+strip_prefix = true
+
+[[listener."public-http".routes.request_rules]]
+name = "Require protected API key header"
+action = "allow"
+require_header = "X-Protected-Key"
+
+[[listener."public-http".routes.request_rules]]
+name = "Block unprotected requests"
+action = "deny"
+
+# Route 4: API v2 with regex matching (no prefix stripping)
+[[listener."public-http".routes]]
+name = "api-v2-regex"
+path_regex = "^/api/v2/.*"
+backend = "127.0.0.1:9093"
+strip_prefix = false
+
+[[listener."public-http".routes.request_rules]]
+name = "V2 API requires special header"
+action = "allow"
+require_header = "X-API-Version"
+
+# Route 5: Large file upload endpoint (size testing)
+[[listener."public-http".routes]]
+name = "upload-endpoint"
+path_prefix = "/upload"
+backend = "127.0.0.1:9094"
+strip_prefix = false
+
+[[listener."public-http".routes.request_rules]]
+name = "Allow POST for uploads"
+action = "allow"
+methods = ["POST"]
+
+[[listener."public-http".routes.response_rules]]
+name = "Limit response size"
+action = "deny"
+max_size_bytes = 1048576  # 1MB limit
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 2: Secure HTTPS API (Port 8443)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."secure-https"]
+ip = "0.0.0.0"
+port = 8443
+description = "Secure HTTPS API with TLS and high-security validation"
+default_action = "reject"
+
+# TLS Configuration - uses self-signed certs for testing
+[listener."secure-https".tls]
+enabled = true
+cert_file = "./certs/server.crt"
+key_file = "./certs/server.key"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# HTTPS listener rules
+# ────────────────────────────────────────────────────────────────────────────────
+
+[[listener."secure-https".request_rules]]
+name = "HTTPS only allows secure methods"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]
+
+[[listener."secure-https".request_rules]]
+name = "Deny insecure methods on HTTPS"
+action = "deny"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Secure HTTPS routes
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: High-security API with Jester-Secret validation
+[[listener."secure-https".routes]]
+name = "secure-api"
+path_prefix = "/api/secure"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."secure-https".routes.validators]]
+validator = "jester_secret"
+on_failure = "deny"
+
+# Route 2: Admin interface (HTTPS only)
+[[listener."secure-https".routes]]
+name = "admin-https"
+path_prefix = "/admin"
+backend = "127.0.0.1:9095"
+strip_prefix = true
+timeout_seconds = 45
+
+[[listener."secure-https".routes.request_rules]]
+name = "Admin requires special token"
+action = "allow"
+require_header = "X-Admin-Token"
+
+[[listener."secure-https".routes.request_rules]]
+name = "Block non-admin requests"
+action = "deny"
+
+# Route 3: TLS health check
+[[listener."secure-https".routes]]
+name = "secure-health"
+path_prefix = "/health-secure"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 3: Internal Admin Interface (Port 8081)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."internal-admin"]
+ip = "127.0.0.1"  # Localhost only
+port = 8081
+description = "Internal admin interface (trusted network, no TLS)"
+default_backend = "127.0.0.1:9095"
+default_action = "forward"  # Forward unmatched requests to admin backend
+
+# No TLS for internal network
+[listener."internal-admin".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Internal admin routes (relaxed security)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: Admin dashboard
+[[listener."internal-admin".routes]]
+name = "admin-dashboard"
+path_prefix = "/dashboard"
+backend = "127.0.0.1:9095"
+strip_prefix = true
+
+[[listener."internal-admin".routes.request_rules]]
+name = "Allow all methods for internal admin"
+action = "allow"
+
+# Route 2: Monitoring endpoints
+[[listener."internal-admin".routes]]
+name = "monitoring"
+path_prefix = "/monitor"
+backend = "127.0.0.1:9091"
+strip_prefix = true
+
+# Route 3: Blacklist management
+[[listener."internal-admin".routes]]
+name = "blacklist-admin"
+path_prefix = "/blacklist"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."internal-admin".routes.request_rules]]
+name = "Allow blacklist operations"
+action = "allow"
+methods = ["GET", "POST", "DELETE"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LISTENER 4: Development Server (Port 3000)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."dev-server"]
+ip = "127.0.0.1"
+port = 3000
+description = "Development server with relaxed rules for testing"
+default_backend = "127.0.0.1:3001"
+default_action = "forward"
+
+# No TLS for development
+[listener."dev-server".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Development routes (minimal filtering)
+# ────────────────────────────────────────────────────────────────────────────────
+
+[[listener."dev-server".request_rules]]
+name = "Allow everything in development"
+action = "allow"
+
+# Route 1: Dev API
+[[listener."dev-server".routes]]
+name = "dev-api"
+path_prefix = "/api"
+backend = "127.0.0.1:9092"
+strip_prefix = false
+timeout_seconds = 60  # Longer timeout for debugging
+
+# Route 2: Frontend development
+[[listener."dev-server".routes]]
+name = "dev-frontend"
+path_prefix = "/app"
+backend = "127.0.0.1:9093"
+strip_prefix = true
+
+# Route 3: Websocket testing (if supported)
+[[listener."dev-server".routes]]
+name = "websocket-test"
+path_prefix = "/ws"
+backend = "127.0.0.1:9094"
+strip_prefix = false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPECIAL TEST ROUTES FOR ERROR HANDLING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Add routes to public-http for testing edge cases
+
+# Route for testing response status filtering
+[[listener."public-http".routes]]
+name = "error-test"
+path_prefix = "/test/errors"
+backend = "127.0.0.1:9095"
+strip_prefix = true
+
+[[listener."public-http".routes.response_rules]]
+name = "Block specific error codes"
+action = "deny"
+status_codes = [404, 403]
+
+# Route for testing timeout behavior
+[[listener."public-http".routes]]
+name = "timeout-test"
+path_prefix = "/test/timeout"
+backend = "127.0.0.1:9096"  # This backend will be slow/unreachable
+strip_prefix = false
+timeout_seconds = 5
+
+# Route for testing method filtering
+[[listener."public-http".routes]]
+name = "method-filter-test"
+path_prefix = "/test/methods"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."public-http".routes.request_rules]]
+name = "Only allow GET and POST"
+action = "allow"
+methods = ["GET", "POST"]
+
+[[listener."public-http".routes.request_rules]]
+name = "Block other methods"
+action = "deny"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKWARD COMPATIBILITY TEST SECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Uncomment this section to test legacy v0.1.0 configuration migration:
+#
+# [proxy]
+# listen_address = "127.0.0.1:8082"
+# backend_address = "127.0.0.1:9090"
+# timeout_seconds = 30
+#
+# [[request_rules]]
+# name = "Legacy block admin"
+# action = "deny"
+# path_regex = "^/admin/.*"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# TESTING NOTES
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This configuration tests:
+# ✅ Multi-listener setup (4 listeners on different ports/IPs)
+# ✅ TLS/HTTPS with certificate validation
+# ✅ Path routing: prefix matching, regex matching, strip_prefix behavior
+# ✅ Request filtering: method filtering, header requirements, path blocking
+# ✅ Response filtering: status code blocking, content size limiting
+# ✅ Validator framework: API key, JWT, Jester-Secret, custom scripts
+# ✅ IP blacklisting: manual blacklist entries, TLS failure tracking
+# ✅ Global vs listener vs route settings hierarchy
+# ✅ Default actions: reject vs forward with default_backend
+# ✅ Timeout configuration: global, listener, and route-specific
+# ✅ Error handling: backend failures, invalid requests, security violations
+#
+# Required backend servers for full testing:
+# - 127.0.0.1:9090 (primary backend)
+# - 127.0.0.1:9091 (public API backend)
+# - 127.0.0.1:9092 (protected API backend) 
+# - 127.0.0.1:9093 (v2 API backend)
+# - 127.0.0.1:9094 (upload backend)
+# - 127.0.0.1:9095 (admin backend)
+# - 127.0.0.1:9096 (timeout test backend - can be unreachable)
+#
+# ═══════════════════════════════════════════════════════════════════════════════

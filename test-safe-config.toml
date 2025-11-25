@@ -1,0 +1,105 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jester Jr Test-Safe Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# This configuration avoids IP blacklisting issues during testing by:
+# - Using a separate clean blacklist file
+# - Configuring routes to avoid blacklisting localhost
+# - Proper route ordering to prevent conflicts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[global]
+log_level = "info"
+timeout_seconds = 30
+blacklist_file = "./test-blacklist.json"
+blacklist_ttl_hours = 1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VALIDATOR REGISTRY  
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# API Key validator - no IP blacklisting
+[validators.api_key]
+type = "builtin"
+
+[validators.api_key.config]
+valid_keys = ["test-key-123", "dev-key-456"]
+header_name = "x-api-key"
+
+# Jester-Secret validator - with IP blacklisting but higher TTL
+[validators.jester_secret]
+type = "builtin"
+
+[validators.jester_secret.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN LISTENER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[listener."main"]
+ip = "127.0.0.1"
+port = 8090
+description = "Test-safe HTTP listener"
+default_action = "reject"
+
+[listener."main".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Block dangerous methods globally
+# ────────────────────────────────────────────────────────────────────────────────
+
+[[listener."main".request_rules]]
+name = "Block dangerous methods"
+action = "deny"
+methods = ["DELETE", "TRACE", "TRACK", "CONNECT"]
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ROUTES (Order is important!)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Route 1: Health check (most specific, no auth)
+[[listener."main".routes]]
+name = "health"
+path_prefix = "/health"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+# Route 2: Public API (requires API key - safer than Jester-Secret)
+[[listener."main".routes]]
+name = "public-api"
+path_prefix = "/api/public"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."main".routes.validators]]
+validator = "api_key"
+on_failure = "deny"
+
+# Route 3: Secure API (requires Jester-Secret)
+[[listener."main".routes]]
+name = "secure-api"  
+path_prefix = "/api/secure"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."main".routes.validators]]
+validator = "jester_secret"
+on_failure = "deny"
+
+# Route 4: Catch-all (no auth, for basic testing)
+[[listener."main".routes]]
+name = "catch-all"
+path_prefix = "/"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+[[listener."main".routes.request_rules]]
+name = "Allow safe methods"
+action = "allow"
+methods = ["GET", "POST", "PUT", "PATCH"]

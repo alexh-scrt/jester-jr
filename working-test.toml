@@ -1,0 +1,72 @@
+# Working test configuration for jester-jr v0.1.0 release
+[global]
+log_level = "info"
+timeout_seconds = 30
+blacklist_file = "./clean-blacklist.json"
+blacklist_ttl_hours = 24
+
+# Simple API key validator
+[validators.api_key]
+type = "builtin"
+
+[validators.api_key.config]
+valid_keys = ["test-key-123", "dev-key-456"]
+header_name = "x-api-key"
+
+# Jester-Secret validator  
+[validators.jester_secret]
+type = "builtin"
+
+[validators.jester_secret.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 0
+
+# HTTP listener on port 8090 (avoid conflicts)
+[listener."main"]
+ip = "127.0.0.1"
+port = 8090
+description = "Main HTTP listener"
+default_action = "reject"
+
+# No TLS for simplicity
+[listener."main".tls]
+enabled = false
+cert_file = ""
+key_file = ""
+
+# Basic health route (no auth)
+[[listener."main".routes]]
+name = "health"
+path_prefix = "/health"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+# Public API with API key
+[[listener."main".routes]]
+name = "public-api"
+path_prefix = "/api/public"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."main".routes.validators]]
+validator = "api_key"
+on_failure = "deny"
+
+# Secure API with Jester-Secret
+[[listener."main".routes]]
+name = "secure-api"
+path_prefix = "/api/secure"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."main".routes.validators]]
+validator = "jester_secret"
+on_failure = "deny"
+
+# Catch-all route for basic requests
+[[listener."main".routes]]
+name = "basic"
+path_prefix = "/"
+backend = "127.0.0.1:9090"
+strip_prefix = false

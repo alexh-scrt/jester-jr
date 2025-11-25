@@ -10,5 +10,5 @@ mod config;
 
 pub use config::{
     CompiledListener, CompiledRequestRule, CompiledResponseRule, CompiledRoute, Config,
-    GlobalSettings, ListenerConfig, RouteConfig, RuleResult, TlsSettings,
+    GlobalSettings, ListenerConfig, RouteConfig, RouteValidatorConfig, RuleResult, TlsSettings, ValidatorConfigEntry,
 };

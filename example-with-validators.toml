@@ -1,0 +1,97 @@
+# Jester Jr with Validators - Example Configuration
+
+[global]
+log_level = "info"
+timeout_seconds = 30
+blacklist_file = "./data/blacklist.json"
+blacklist_ttl_hours = 24
+
+# ═══════════════════════════════════════════════════════════
+# VALIDATOR REGISTRY
+# ═══════════════════════════════════════════════════════════
+
+# Built-in API key validator
+[validators.simple_api_key]
+type = "builtin"
+config = { valid_keys = ["key1", "key2", "key3"], header_name = "x-api-key" }
+
+# Built-in Jester-Secret validator with IP blacklisting
+[validators.jester_secret_key]
+type = "builtin"
+
+[validators.jester_secret_key.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 24
+
+# Built-in JWT validator (HS256 with secret)
+[validators.jwt_auth]
+type = "builtin"
+config = { 
+    secret = "your-secret-key",
+    issuer = "auth.example.com",
+    audience = "api",
+    algorithms = ["HS256"]
+}
+
+# Rhai script validator
+[validators.header_validator]
+type = "script"
+path = "./validators/examples/header_check.rhai"
+
+# ═══════════════════════════════════════════════════════════
+# LISTENERS WITH VALIDATORS
+# ═══════════════════════════════════════════════════════════
+
+[listener."api"]
+ip = "0.0.0.0"
+port = 8080
+default_action = "reject"
+
+# Public API route with API key validation
+[[listener."api".routes]]
+name = "public-api"
+path_prefix = "/api/public"
+backend = "127.0.0.1:9090"
+strip_prefix = true
+
+[[listener."api".routes.validators]]
+validator = "simple_api_key"
+on_failure = "deny"
+
+# Protected API route with JWT validation
+[[listener."api".routes]]
+name = "protected-api"
+path_prefix = "/api/protected"
+backend = "127.0.0.1:9091"
+strip_prefix = true
+
+[[listener."api".routes.validators]]
+validator = "jwt_auth"
+on_failure = "deny"
+
+# Admin API with multiple validators (header check + JWT)
+[[listener."api".routes]]
+name = "admin-api"
+path_prefix = "/api/admin"
+backend = "127.0.0.1:9092"
+strip_prefix = true
+
+[[listener."api".routes.validators]]
+validator = "header_validator"
+on_failure = "deny"
+
+[[listener."api".routes.validators]]
+validator = "jwt_auth"
+on_failure = "deny"
+
+# High-security API route with Jester-Secret validation and IP blacklisting
+[[listener."api".routes]]
+name = "secure-api"
+path_prefix = "/api/secure"
+backend = "127.0.0.1:9093"
+strip_prefix = true
+
+[[listener."api".routes.validators]]
+validator = "jester_secret_key"
+on_failure = "deny"

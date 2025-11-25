@@ -1,0 +1,105 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jester Jr Configuration with TLS Failure Blacklisting
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# This example shows how to configure TLS failure-based IP blacklisting to
+# automatically protect against IPs that repeatedly fail TLS handshake attempts.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[global]
+log_level = "info"
+timeout_seconds = 30
+
+# IP Blacklist Configuration
+blacklist_file = "./data/blacklist.json"
+blacklist_ttl_hours = 24
+
+# TLS Failure Blacklisting (NEW FEATURE)
+# Automatically blacklist IPs that fail TLS handshake repeatedly
+blacklist_failed_tls = true                        # Enable TLS failure tracking
+blacklist_failed_tls_attempts = 3                  # Number of failures before blacklisting
+blacklist_failed_tls_attempts_in_min = 5          # Time window in minutes
+blacklist_failed_tls_ttl_hours = 24               # How long to blacklist (hours)
+
+# Example: IP that fails TLS handshake 3 times within 5 minutes gets blacklisted for 24 hours
+
+# Built-in Jester-Secret validator with IP blacklisting
+[validators.jester_secret]
+type = "builtin"
+
+[validators.jester_secret.config]
+valid_keys = ["FVDRuKEZw4LBnLxVkWjD"]
+header_name = "jester-secret"
+blacklist_ttl_hours = 24
+
+# HTTPS Listener with TLS Failure Protection
+[listener."secure-api"]
+ip = "0.0.0.0"
+port = 8443
+description = "Secure API with TLS failure blacklisting"
+default_action = "reject"
+
+[listener."secure-api".tls]
+enabled = true
+cert_file = "/path/to/cert.pem"
+key_file = "/path/to/key.pem"
+
+# API route with secret validation
+[[listener."secure-api".routes]]
+name = "api"
+path_prefix = "/api"
+backend = "127.0.0.1:9090"
+strip_prefix = false
+
+[[listener."secure-api".routes.validators]]
+validator = "jester_secret"
+on_failure = "deny"
+
+# Health check route (no auth required)
+[[listener."secure-api".routes]]
+name = "health"
+path_prefix = "/health"
+backend = "127.0.0.1:8090"
+strip_prefix = false
+
+[[listener."secure-api".routes.request_rules]]
+name = "Allow health checks"
+action = "allow"
+methods = ["GET"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TLS Failure Blacklisting Behavior
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# When TLS failure blacklisting is enabled, the proxy will:
+# 
+# 1. Track TLS handshake failures per IP address
+# 2. Record different types of TLS errors:
+#    - InvalidContentType: Malformed TLS data
+#    - ConnectionClosed: Client disconnected during handshake
+#    - Timeout: TLS handshake took too long
+#    - HandshakeError: General TLS protocol errors
+#    - Other: Miscellaneous errors
+# 
+# 3. Count failures within a sliding time window
+# 4. Automatically blacklist IPs that exceed the threshold
+# 5. Log all blacklisting actions with detailed reasoning
+# 
+# Example logs:
+# INFO  🔧 TLS failure tracking enabled: 3 failures in 5 minutes → blacklist for 24 hours
+# DEBUG TLS handshake failed for 192.168.1.100: TLS handshake timeout (classified as: Timeout)
+# WARN  🚫 IP 192.168.1.100 exceeded TLS failure threshold: 3 failures in 5 minutes
+# WARN  🚫 Blacklisted IP 192.168.1.100 due to repeated TLS failures
+# 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Security Benefits
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# - Protection against TLS-based attacks and reconnaissance
+# - Automatic mitigation of malformed TLS requests
+# - Reduces load from problematic clients
+# - Configurable thresholds for different threat environments
+# - Persistent blacklisting with automatic expiry
+# - Integration with existing IP blacklist infrastructure
+# 
+# ═══════════════════════════════════════════════════════════════════════════════

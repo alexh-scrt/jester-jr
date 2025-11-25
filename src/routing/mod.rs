@@ -97,6 +97,7 @@ mod tests {
             timeout_seconds: 30,
             request_rules: vec![],
             response_rules: vec![],
+            validators: vec![],
         };
 
         assert!(matches_route(&route, "/api/v1/users").is_some());
@@ -114,6 +115,7 @@ mod tests {
             timeout_seconds: 30,
             request_rules: vec![],
             response_rules: vec![],
+            validators: vec![],
         };
 
         let rewritten = matches_route(&route, "/api/v1/users").unwrap();
@@ -134,6 +136,7 @@ mod tests {
             timeout_seconds: 30,
             request_rules: vec![],
             response_rules: vec![],
+            validators: vec![],
         };
 
         assert!(matches_route(&route, "/api/v1/users").is_some());
