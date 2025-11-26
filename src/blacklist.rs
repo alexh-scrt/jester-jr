@@ -2,7 +2,7 @@
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -106,6 +106,7 @@ impl IpBlacklist {
     }
 
     /// Remove an IP from the blacklist
+    #[allow(dead_code)]
     pub fn remove_ip(&self, ip: IpAddr) -> bool {
         let removed = {
             let mut entries = self.entries.write();
@@ -123,6 +124,7 @@ impl IpBlacklist {
     }
 
     /// Get all blacklisted IPs (for monitoring/debugging)
+    #[allow(dead_code)]
     pub fn get_blacklisted_ips(&self) -> Vec<IpAddr> {
         let entries = self.entries.read();
         let now = current_timestamp();
@@ -138,11 +140,11 @@ impl IpBlacklist {
     }
 
     /// Clean up expired entries
+    #[allow(dead_code)]
     pub fn cleanup_expired(&self) -> usize {
         let now = current_timestamp();
-        let mut removed_count = 0;
 
-        {
+        let removed_count = {
             let mut entries = self.entries.write();
             let initial_count = entries.len();
             
@@ -156,8 +158,8 @@ impl IpBlacklist {
                 true
             });
             
-            removed_count = initial_count - entries.len();
-        }
+            initial_count - entries.len()
+        };
 
         if removed_count > 0 {
             info!("🧹 Cleaned up {} expired blacklist entries", removed_count);
@@ -170,6 +172,7 @@ impl IpBlacklist {
     }
 
     /// Get blacklist statistics
+    #[allow(dead_code)]
     pub fn stats(&self) -> BlacklistStats {
         let entries = self.entries.read();
         let now = current_timestamp();
@@ -267,6 +270,7 @@ impl IpBlacklist {
 }
 
 /// Blacklist statistics
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BlacklistStats {
     pub total_entries: usize,

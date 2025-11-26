@@ -79,6 +79,7 @@ pub struct TlsSettings {
 #[derive(Debug, Deserialize, Clone)]
 pub struct GlobalSettings {
     #[serde(default = "default_log_level")]
+    #[allow(dead_code)]
     pub log_level: String,
 
     #[serde(default = "default_timeout")]
@@ -292,6 +293,7 @@ pub struct CompiledRoute {
     pub path_pattern: Option<Regex>,
     pub backend: String,
     pub strip_prefix: bool,
+    #[allow(dead_code)]
     pub timeout_seconds: u64,
     pub request_rules: Vec<CompiledRequestRule>,
     pub response_rules: Vec<CompiledResponseRule>,
@@ -315,6 +317,7 @@ impl Config {
     }
 
     /// Compile request rules (pre-compile regex patterns)
+    #[allow(dead_code)]
     pub fn compile_request_rules(
         &self,
     ) -> Result<Vec<CompiledRequestRule>, Box<dyn std::error::Error>> {
@@ -340,6 +343,7 @@ impl Config {
     }
 
     /// Compile response rules
+    #[allow(dead_code)]
     pub fn compile_response_rules(&self) -> Vec<CompiledResponseRule> {
         self.response_rules
             .iter()

@@ -4,7 +4,6 @@ use crate::validators::*;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::net::IpAddr;
 use tracing::{debug, warn};
 
 /// Jester-Secret validator configuration

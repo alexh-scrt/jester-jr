@@ -139,21 +139,25 @@ impl std::error::Error for ValidationError {}
 
 impl ValidationResult {
     /// Check if result is Allow or AllowWithModification
+    #[allow(dead_code)]
     pub fn is_allowed(&self) -> bool {
         matches!(self, ValidationResult::Allow | ValidationResult::AllowWithModification { .. })
     }
 
     /// Check if result is Deny or BlacklistIP
+    #[allow(dead_code)]
     pub fn is_denied(&self) -> bool {
         matches!(self, ValidationResult::Deny { .. } | ValidationResult::BlacklistIP { .. })
     }
 
     /// Check if result requires IP blacklisting
+    #[allow(dead_code)]
     pub fn should_blacklist_ip(&self) -> bool {
         matches!(self, ValidationResult::BlacklistIP { .. })
     }
 
     /// Get the IP to blacklist if this result requires blacklisting
+    #[allow(dead_code)]
     pub fn get_blacklist_ip(&self) -> Option<IpAddr> {
         match self {
             ValidationResult::BlacklistIP { ip, .. } => Some(*ip),

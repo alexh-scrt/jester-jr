@@ -134,6 +134,19 @@ impl HttpRequest {
 
     /// Check if request has a body
     pub fn has_body(&self) -> bool {
-        self.content_length.is_some() && self.content_length.unwrap() > 0
+        // Check for Content-Length > 0
+        if self.content_length.is_some() && self.content_length.unwrap() > 0 {
+            return true;
+        }
+        
+        // Check for Transfer-Encoding: chunked
+        if let Some(transfer_encoding) = self.get_header("transfer-encoding") {
+            if transfer_encoding.to_lowercase().contains("chunked") {
+                return true;
+            }
+        }
+        
+        // POST, PUT, PATCH typically have bodies even without explicit Content-Length
+        matches!(self.method.as_str(), "POST" | "PUT" | "PATCH")
     }
 }

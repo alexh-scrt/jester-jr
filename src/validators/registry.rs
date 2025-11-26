@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone, Deserialize)]
 pub struct ValidatorConfig {
     /// Validator name (unique identifier)
+    #[allow(dead_code)]
     pub name: String,
 
     /// Validator type (builtin, script, wasm, dylib)
@@ -26,6 +27,7 @@ pub struct ValidatorConfig {
 
     /// Timeout in seconds (default: 5)
     #[serde(default = "default_timeout")]
+    #[allow(dead_code)]
     pub timeout_seconds: u64,
 }
 
@@ -84,6 +86,7 @@ impl ValidatorRegistry {
     }
 
     /// Get all validator names
+    #[allow(dead_code)]
     pub fn validator_names(&self) -> Vec<String> {
         self.validators.keys().cloned().collect()
     }
@@ -129,7 +132,7 @@ impl ValidatorRegistry {
         match config.validator_type {
             ValidatorType::Builtin => {
                 // Built-in validators are already registered, but need configuration
-                if let Some(validator) = self.validators.get(name) {
+                if let Some(_validator) = self.validators.get(name) {
                     debug!("Initializing built-in validator '{}' with config", name);
                     
                     // We need to clone the validator to get a mutable reference
@@ -231,6 +234,7 @@ impl ValidatorRegistry {
     }
 
     /// Shutdown all validators
+    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         info!("🔄 Shutting down validators");
 

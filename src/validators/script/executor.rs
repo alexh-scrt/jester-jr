@@ -4,13 +4,15 @@ use crate::validators::*;
 use async_trait::async_trait;
 use rhai::{AST, Engine, Map, Scope};
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::debug;
 
 /// Rhai script validator
 pub struct RhaiValidator {
+    #[allow(dead_code)]
     name: String,
     engine: Arc<Engine>,
     ast: Arc<AST>,
+    #[allow(dead_code)]
     config: serde_json::Value,
 }
 

@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 /// header bytes are preserved for efficient forwarding to the client.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
+    #[allow(dead_code)]
     pub version: String,
     pub status_code: u16,
     pub status_text: String,
@@ -48,6 +49,11 @@ impl HttpResponse {
                     }
 
                     lines.push(line.trim_end().to_string());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Non-blocking socket would block, wait a bit and retry
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
                 }
                 Err(e) => {
                     warn!(error = ?e, "Error reading response headers");

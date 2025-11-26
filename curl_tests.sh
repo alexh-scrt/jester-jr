@@ -124,7 +124,7 @@ echo "🔍 Testing verbose requests (with headers)..."
 # Test 16: Check response headers
 echo -n "Response headers check: "
 headers=$(curl -v -I -H 'jester-secret: FVDRuKEZw4LBnLxVkWjD' http://127.0.0.1:8090/health 2>/dev/null)
-if [[ "$headers" =~ "HTTP/1.1 200" ]] && [[ "$headers" =~ "Content-Type" ]]; then
+if ([[ "$headers" =~ "HTTP/1.1 200" ]] || [[ "$headers" =~ "HTTP/1.0 200" ]]) && [[ "$headers" =~ "Content-Type" ]]; then
     echo -e "${GREEN}✅ PASS${NC}"
 else
     echo -e "${RED}❌ FAIL${NC}"

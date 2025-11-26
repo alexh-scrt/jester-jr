@@ -4,7 +4,6 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// The core validator trait that all validators must implement.
 ///
@@ -26,9 +25,11 @@ pub trait Validator: Send + Sync {
     ) -> Result<super::ValidationResult, super::ValidationError>;
 
     /// Get validator name (for logging and debugging)
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 
     /// Get validator version
+    #[allow(dead_code)]
     fn version(&self) -> &str;
 
     /// Get validator type (builtin, script, wasm, dylib)
@@ -45,6 +46,7 @@ pub trait Validator: Send + Sync {
     /// Shutdown hook - called before validator is dropped
     ///
     /// Useful for cleaning up resources (connections, file handles, etc.)
+    #[allow(dead_code)]
     async fn shutdown(&self) -> Result<(), String> {
         Ok(())
     }

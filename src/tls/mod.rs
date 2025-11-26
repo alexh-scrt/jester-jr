@@ -3,7 +3,7 @@
 //! This module handles loading certificates and private keys,
 //! configuring TLS acceptors, and managing secure connections.
 
-use rustls::{RootCertStore, ServerConfig};
+use rustls::ServerConfig;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::fs::File;
 use std::io::BufReader;

@@ -531,6 +531,7 @@ fn handle_plain_connection_with_routing(
                     backend,
                     &request.path, // Use original path for default backend
                     client_writer,
+                    client_reader,
                     &listener.response_rules,
                     &listener.response_rules,
                     read_timeout,
@@ -638,6 +639,7 @@ fn handle_plain_connection_with_routing(
         &route_match.route.backend,
         &route_match.rewritten_path, // Use rewritten path
         client_writer,
+        client_reader,
         &listener.response_rules,          // Listener-level response rules
         &route_match.route.response_rules, // Route-level response rules
         read_timeout,
@@ -974,6 +976,7 @@ fn forward_to_backend_with_path(
     backend_addr: &str,
     rewritten_path: &str,
     mut client_writer: TcpStream,
+    mut client_reader: BufReader<TcpStream>,
     response_rules_1: &[CompiledResponseRule],
     response_rules_2: &[CompiledResponseRule],
     read_timeout: Duration,
@@ -998,6 +1001,8 @@ fn forward_to_backend_with_path(
 
     let mut backend_writer = backend_stream.try_clone()?;
     let mut backend_reader = BufReader::new(backend_stream);
+    
+    // client_reader is already passed as parameter with request body data
 
     // Rebuild request headers with rewritten path
     let request_line = format!(
@@ -1028,8 +1033,76 @@ fn forward_to_backend_with_path(
 
     // Handle request body if present (using existing logic)
     if request.has_body() {
-        info!("➡️  Request has body, but streaming not implemented in Phase 4");
-        // TODO: Implement body streaming in future versions
+        info!("➡️  Streaming request body...");
+        let mut total_bytes = 0u64;
+        let mut buffer = [0u8; 8192];
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30); // Match read_timeout
+        
+        // If we have Content-Length, read exactly that many bytes
+        if let Some(content_length) = request.content_length {
+            let mut remaining = content_length;
+            
+            while remaining > 0 {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  Request body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                let to_read = std::cmp::min(remaining, buffer.len());
+                match client_reader.read(&mut buffer[..to_read]) {
+                    Ok(0) => break, // EOF reached
+                    Ok(n) => {
+                        if let Err(e) = backend_writer.write_all(&buffer[..n]) {
+                            warn!("   ⚠️  Error forwarding request body: {}", e);
+                            break;
+                        }
+                        total_bytes += n as u64;
+                        remaining = remaining.saturating_sub(n);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Non-blocking socket would block, wait a bit and retry
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading request body: {}", e);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Fallback: read until EOF for chunked/unknown length
+            loop {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  Request body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                match client_reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Err(e) = backend_writer.write_all(&buffer[..n]) {
+                            warn!("   ⚠️  Error forwarding request body: {}", e);
+                            break;
+                        }
+                        total_bytes += n as u64;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Non-blocking socket would block, wait a bit and retry
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading request body: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        backend_writer.flush()?;
+        info!("   ➡️  Request body complete: {} bytes", total_bytes);
     }
 
     // Read backend response
@@ -1071,7 +1144,33 @@ fn forward_to_backend_with_path(
     // Stream response body if present (using existing logic)
     if response.has_body() {
         info!("📤 Streaming response body...");
-        // TODO: Implement proper body streaming
+        let mut total_bytes = 0u64;
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            match backend_reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = client_writer.write_all(&buffer[..n]) {
+                        warn!("   ⚠️  Error forwarding response body: {}", e);
+                        break;
+                    }
+                    total_bytes += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Non-blocking socket would block, wait a bit and retry
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    warn!("   ⚠️  Error reading response body: {}", e);
+                    break;
+                }
+            }
+        }
+
+        client_writer.flush()?;
+        info!("   📤 Response body complete: {} bytes", total_bytes);
     }
 
     Ok(())
@@ -1083,7 +1182,7 @@ fn forward_to_backend_with_path_tls(
     request: &HttpRequest,
     backend_addr: &str,
     rewritten_path: &str,
-    tls_reader: TlsReader,
+    mut tls_reader: TlsReader,
     response_rules_1: &[CompiledResponseRule],
     response_rules_2: &[CompiledResponseRule],
     read_timeout: Duration,
@@ -1091,6 +1190,70 @@ fn forward_to_backend_with_path_tls(
 ) -> Result<(), std::io::Error> {
     info!("🔗 Connecting to backend at {} (TLS client)", backend_addr);
     debug!(original_path = %request.path, rewritten_path = %rewritten_path, backend = %backend_addr, "Prepared backend forward (TLS client)");
+
+    // Handle request body if present (TLS version) - before destructuring reader
+    let mut request_body = Vec::new();
+    if request.has_body() {
+        info!("➡️  Reading TLS request body...");
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        
+        // If we have Content-Length, read exactly that many bytes
+        if let Some(content_length) = request.content_length {
+            let mut remaining = content_length;
+            let mut buffer = [0u8; 8192];
+            
+            while remaining > 0 {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  TLS request body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                let to_read = std::cmp::min(remaining, buffer.len());
+                match tls_reader.read(&mut buffer[..to_read]) {
+                    Ok(0) => break, // EOF reached
+                    Ok(n) => {
+                        request_body.extend_from_slice(&buffer[..n]);
+                        remaining = remaining.saturating_sub(n);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading TLS request body: {}", e);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Fallback: read until EOF for chunked/unknown length
+            let mut buffer = [0u8; 8192];
+            loop {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  TLS request body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                match tls_reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request_body.extend_from_slice(&buffer[..n]);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading TLS request body: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("   ➡️  TLS request body complete: {} bytes", request_body.len());
+    }
 
     // Extract TLS connection and stream once
     let TlsReader {
@@ -1146,6 +1309,14 @@ fn forward_to_backend_with_path_tls(
     backend_writer.write_all(b"\r\n")?;
     backend_writer.flush()?;
 
+    // Write request body if present (already read into buffer)
+    if !request_body.is_empty() {
+        info!("➡️  Forwarding TLS request body...");
+        backend_writer.write_all(&request_body)?;
+        backend_writer.flush()?;
+        info!("   ➡️  TLS request body complete: {} bytes", request_body.len());
+    }
+
     // Read backend response
     let response = match HttpResponse::parse(&mut backend_reader) {
         Ok(resp) => {
@@ -1187,6 +1358,73 @@ fn forward_to_backend_with_path_tls(
     let _ = tls_conn.writer().write_all(&response.raw_headers);
     let _ = tls_conn.write_tls(&mut client_stream);
 
+    // Stream response body if present (TLS version)
+    if response.has_body() {
+        info!("📤 Streaming TLS response body...");
+        let mut total_bytes = 0u64;
+        let mut buffer = [0u8; 8192];
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        
+        // If we have Content-Length, read exactly that many bytes
+        if let Some(content_length) = response.content_length {
+            let mut remaining = content_length;
+            
+            while remaining > 0 {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  TLS response body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                let to_read = std::cmp::min(remaining, buffer.len());
+                match backend_reader.read(&mut buffer[..to_read]) {
+                    Ok(0) => break, // EOF reached
+                    Ok(n) => {
+                        let _ = tls_conn.writer().write_all(&buffer[..n]);
+                        let _ = tls_conn.write_tls(&mut client_stream);
+                        total_bytes += n as u64;
+                        remaining = remaining.saturating_sub(n);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading TLS response body: {}", e);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Fallback: read until EOF for chunked/unknown length
+            loop {
+                if start.elapsed() > timeout {
+                    warn!("   ⚠️  TLS response body read timeout after {:?}", timeout);
+                    break;
+                }
+
+                match backend_reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = tls_conn.writer().write_all(&buffer[..n]);
+                        let _ = tls_conn.write_tls(&mut client_stream);
+                        total_bytes += n as u64;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Error reading TLS response body: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("   📤 TLS response body complete: {} bytes", total_bytes);
+    }
+
     Ok(())
 }
 
@@ -1211,18 +1449,22 @@ fn evaluate_merged_response_rules(
 
 /// Helper to add take_connection and take_stream methods to TlsReader
 impl TlsReader {
+    #[allow(dead_code)]
     fn get_connection(&mut self) -> &mut ServerConnection {
         &mut self.conn
     }
 
+    #[allow(dead_code)]
     fn get_stream(&mut self) -> &mut TcpStream {
         &mut self.stream
     }
 
+    #[allow(dead_code)]
     fn take_connection(self) -> ServerConnection {
         self.conn
     }
 
+    #[allow(dead_code)]
     fn take_stream(self) -> TcpStream {
         self.stream
     }
@@ -1244,6 +1486,7 @@ impl TlsReader {
 /// * `Ok(())` - Never returns normally (infinite loop)
 /// * `Err(IoError)` - If the TCP listener fails to bind
 #[instrument(skip(config, request_rules, response_rules, tls_config))]
+#[allow(dead_code)]
 fn run_server(
     config: Config,
     request_rules: Vec<CompiledRequestRule>,
@@ -1312,6 +1555,7 @@ fn run_server(
 }
 
 #[instrument(skip(client_stream, request_rules, response_rules, tls_config))]
+#[allow(dead_code)]
 fn handle_connection(
     client_stream: TcpStream,
     backend_addr: &str,
@@ -1364,6 +1608,7 @@ fn handle_connection(
 /// Key insight: We keep ServerConnection in one place and manually
 /// handle encryption/decryption at the right points.
 #[instrument(skip(client_stream, request_rules, response_rules, tls_config))]
+#[allow(dead_code)]
 fn handle_tls_connection(
     mut client_stream: TcpStream,
     backend_addr: &str,
@@ -1947,6 +2192,7 @@ impl std::io::BufRead for TlsReader {
 /// * `Ok(())` - Connection handled successfully
 /// * `Err(IoError)` - If any I/O operation fails
 #[instrument(skip(client_stream, request_rules, response_rules))]
+#[allow(dead_code)]
 fn handle_plain_connection(
     client_stream: TcpStream,
     backend_addr: &str,

@@ -178,12 +178,14 @@ impl TlsFailureTracker {
     }
 
     /// Get current failure count for an IP
+    #[allow(dead_code)]
     pub fn get_failure_count(&self, ip: IpAddr) -> u32 {
         let failures = self.failures.read();
         failures.get(&ip).map(|e| e.failure_count).unwrap_or(0)
     }
 
     /// Get all tracked IPs and their failure counts (for debugging/monitoring)
+    #[allow(dead_code)]
     pub fn get_all_failures(&self) -> HashMap<IpAddr, (u32, Vec<String>)> {
         let failures = self.failures.read();
         failures
@@ -228,6 +230,7 @@ impl TlsFailureTracker {
     }
 
     /// Update configuration (useful for runtime config changes)
+    #[allow(dead_code)]
     pub fn update_config(&mut self, config: TlsFailureConfig) {
         info!("📝 Updating TLS failure tracker config: enabled={}, max_attempts={}, window={}min", 
                config.enabled, config.max_attempts, config.time_window_minutes);
@@ -242,6 +245,7 @@ impl TlsFailureTracker {
     }
 
     /// Get statistics about current tracking
+    #[allow(dead_code)]
     pub fn get_stats(&self) -> TlsFailureStats {
         let failures = self.failures.read();
         let total_tracked_ips = failures.len();
@@ -259,6 +263,7 @@ impl TlsFailureTracker {
 
 /// Statistics about TLS failure tracking
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct TlsFailureStats {
     pub enabled: bool,
     pub tracked_ips: usize,

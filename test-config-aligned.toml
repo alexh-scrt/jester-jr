@@ -47,16 +47,16 @@ blacklist_ttl_hours = 1  # Short TTL for testing (1 hour)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 [listener."main"]
-ip = "127.0.0.1"
+ip = "0.0.0.0"
 port = 8090
 description = "Main HTTP listener for curl tests"
 default_action = "reject"
 
 # No TLS for testing simplicity
 [listener."main".tls]
-enabled = false
-cert_file = ""
-key_file = ""
+enabled = true
+cert_file = "/mnt/secure/cert/secretai-yyzz/fullchain.pem"
+key_file = "/mnt/secure/cert/secretai-yyzz/privkey.pem"
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Global listener rules (apply to ALL routes)

@@ -4,7 +4,7 @@ use super::WasmRuntime;
 use crate::validators::*;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use wasmtime::*;
 
 /// WASM validator wrapper

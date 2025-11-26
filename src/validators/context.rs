@@ -39,6 +39,7 @@ pub struct ValidationContext {
     ///
     /// Useful for rate limiting, caching, etc.
     #[serde(skip)]
+    #[allow(dead_code)]
     pub state: Arc<ValidatorState>,
 }
 
@@ -51,6 +52,7 @@ pub struct ValidationContext {
 #[derive(Default, Debug)]
 pub struct ValidatorState {
     /// Generic key-value store
+    #[allow(dead_code)]
     pub data: parking_lot::RwLock<HashMap<String, serde_json::Value>>,
 }
 
@@ -83,6 +85,7 @@ impl ValidationContext {
     }
 
     /// Check if a header exists (case-insensitive)
+    #[allow(dead_code)]
     pub fn has_header(&self, name: &str) -> bool {
         self.headers.contains_key(&name.to_lowercase())
     }
@@ -95,21 +98,25 @@ impl ValidatorState {
     }
 
     /// Get a value from state
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<serde_json::Value> {
         self.data.read().get(key).cloned()
     }
 
     /// Set a value in state
+    #[allow(dead_code)]
     pub fn set(&self, key: String, value: serde_json::Value) {
         self.data.write().insert(key, value);
     }
 
     /// Remove a value from state
+    #[allow(dead_code)]
     pub fn remove(&self, key: &str) -> Option<serde_json::Value> {
         self.data.write().remove(key)
     }
 
     /// Clear all state
+    #[allow(dead_code)]
     pub fn clear(&self) {
         self.data.write().clear();
     }
